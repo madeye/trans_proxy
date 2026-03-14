@@ -1,3 +1,27 @@
+//! Original destination recovery for pf-redirected connections.
+//!
+//! When macOS pf's `rdr` rule rewrites a packet's destination, the original
+//! target is stored in pf's NAT state table. This module queries that table
+//! using the `DIOCNATLOOK` ioctl on `/dev/pf` to recover the original
+//! destination address.
+//!
+//! This is the same technique used by [mitmproxy](https://mitmproxy.org/)
+//! in transparent mode.
+//!
+//! # FFI Safety
+//!
+//! The [`PfiocNatlook`] struct is `#[repr(C)]` and matches the layout of
+//! `struct pfioc_natlook` from macOS `net/pfvar.h`. The ioctl number
+//! [`DIOCNATLOOK`] is computed at compile time to match the kernel's
+//! `_IOWR('D', 23, struct pfioc_natlook)`.
+//!
+//! # Fallback
+//!
+//! If `DIOCNATLOOK` fails (e.g., the connection wasn't redirected by pf),
+//! [`get_original_dest`] falls back to checking whether `getsockname()`
+//! returned a different address than the listen address, which works with
+//! `divert-to` rules.
+
 use anyhow::{Context, Result};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::fd::{AsRawFd, RawFd};
@@ -7,7 +31,7 @@ use std::sync::Arc;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct PfAddr {
-    /// union: [u8;16] — we use the first 4 bytes as IPv4
+    /// union: `[u8; 16]` — we use the first 4 bytes as IPv4
     addr: [u8; 16],
 }
 
@@ -41,7 +65,7 @@ impl Default for PfiocNatlook {
 /// From pfvar.h: #define DIOCNATLOOK _IOWR('D', 23, struct pfioc_natlook)
 /// _IOWR encodes: direction(in+out) | size | group | number
 /// group 'D' = 0x44, number = 23 = 0x17
-/// size = mem::size_of::<PfiocNatlook>()
+/// size = `mem::size_of::<PfiocNatlook>()`
 ///
 /// macOS ioctl encoding:
 ///   IOC_INOUT (0xC0000000) | (size << 16) | ('D' << 8) | 23

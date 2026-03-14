@@ -1,7 +1,25 @@
-/// Extract SNI (Server Name Indication) hostname from a TLS ClientHello message.
-///
-/// Peeks at the first bytes of a TCP stream to parse the TLS handshake
-/// without consuming the data, so it can still be forwarded to the upstream proxy.
+//! TLS ClientHello SNI (Server Name Indication) extraction.
+//!
+//! Peeks at the first bytes of a TCP stream to parse the TLS handshake
+//! and extract the hostname from the SNI extension, without consuming the
+//! data so it can still be forwarded to the upstream proxy.
+//!
+//! # TLS Record Format
+//!
+//! ```text
+//! TLS Record: type(1) | version(2) | length(2)
+//!   └─ Handshake: type(1) | length(3)
+//!       └─ ClientHello: version(2) | random(32) | session_id(var)
+//!           | cipher_suites(var) | compression(var) | extensions(var)
+//!           └─ Extension 0x0000 (server_name):
+//!               └─ ServerNameList: length(2)
+//!                   └─ HostName: type(1)=0x00 | length(2) | name(var)
+//! ```
+//!
+//! # Non-destructive
+//!
+//! Uses [`TcpStream::peek`](tokio::net::TcpStream::peek) so the ClientHello
+//! bytes remain in the socket buffer for the subsequent relay.
 
 use anyhow::Result;
 use tokio::net::TcpStream;

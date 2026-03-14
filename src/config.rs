@@ -1,3 +1,8 @@
+//! CLI configuration for trans_proxy.
+//!
+//! All settings are provided via command-line flags — no config files.
+//! Uses [`clap`] derive macros for parsing and help generation.
+
 use clap::Parser;
 use std::net::SocketAddr;
 

@@ -1,3 +1,21 @@
+//! HTTP CONNECT tunnel establishment and relay.
+//!
+//! Opens a TCP connection to the upstream proxy, performs an HTTP CONNECT
+//! handshake to the original destination, and returns the connected stream
+//! for bidirectional relay.
+//!
+//! # Timeouts
+//!
+//! All phases of the CONNECT handshake (connect, send, receive) are subject
+//! to a 10-second timeout to prevent hung connections.
+//!
+//! # Hostname Support
+//!
+//! When a hostname is available (from SNI or DNS lookup), the CONNECT request
+//! uses `CONNECT hostname:port` instead of `CONNECT ip:port`, allowing the
+//! upstream proxy to perform its own DNS resolution and apply domain-based
+//! access policies.
+
 use anyhow::{bail, Context, Result};
 use std::net::SocketAddrV4;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

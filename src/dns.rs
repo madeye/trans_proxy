@@ -1,8 +1,26 @@
-/// Local DNS forwarder that captures IP→domain mappings from responses.
-///
-/// Listens on a UDP port, forwards queries to an upstream DNS server,
-/// parses A records from responses, and stores the IP→domain mapping
-/// in a shared lookup table for the proxy to use.
+//! Local DNS forwarder with IP→domain mapping capture.
+//!
+//! Listens on a UDP port, forwards all DNS queries to a configured upstream
+//! server, and parses A records from responses to build an IP→domain lookup
+//! table shared with the proxy.
+//!
+//! # Purpose
+//!
+//! When a client resolves `example.com` → `93.184.216.34`, the DNS forwarder
+//! records this mapping. Later, when the proxy intercepts a connection to
+//! `93.184.216.34:80`, it can look up the hostname and send
+//! `CONNECT example.com:80` instead of `CONNECT 93.184.216.34:80`.
+//!
+//! This is particularly useful for:
+//! - Plain HTTP (port 80) where there is no TLS SNI to extract
+//! - TLS clients that don't send SNI (rare but possible)
+//! - Upstream proxies that require hostnames for routing or access control
+//!
+//! # Cache
+//!
+//! The lookup table is capped at [`MAX_CACHE_ENTRIES`] (10,000). When full,
+//! half the entries are evicted. Entries are not TTL-aware — they persist
+//! until evicted or overwritten by a newer response.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};

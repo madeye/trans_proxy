@@ -1,3 +1,12 @@
+//! TCP accept loop and per-connection transparent proxy handler.
+//!
+//! For each accepted connection:
+//! 1. Recovers the original destination via [`crate::orig_dest`]
+//! 2. Attempts SNI extraction via [`crate::sni`] (port 443)
+//! 3. Falls back to DNS table lookup via [`crate::dns`]
+//! 4. Opens an HTTP CONNECT tunnel via [`crate::tunnel`]
+//! 5. Relays data bidirectionally between client and upstream proxy
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 

@@ -2,6 +2,10 @@
 name = "trans_proxy"
 version = "0.1.0"
 edition = "2021"
+description = "Transparent proxy for macOS pf redirection with upstream HTTP CONNECT proxy support"
+license = "MIT"
+repository = "https://github.com/madeye/trans_proxy"
+authors = ["Max Lv <max.c.lv@gmail.com>"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
