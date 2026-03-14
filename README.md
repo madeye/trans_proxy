@@ -20,6 +20,7 @@ Designed to run on a Mac acting as a side router (gateway) for other devices on 
 - **SNI extraction** — Peeks at TLS ClientHello to extract hostnames, sending proper `CONNECT host:port` instead of raw IPs
 - **DNS interception** — Optional local DNS forwarder that builds an IP→domain lookup table as a fallback for hostname resolution
 - **Anchor-based pf rules** — Won't clobber your existing firewall config
+- **Daemon mode** — Run as a background process with PID file and log file support
 - **Async I/O** — Built on tokio with per-connection task spawning
 
 ## Requirements
@@ -62,13 +63,21 @@ sudo ./target/release/trans_proxy \
   --dns-listen 0.0.0.0:5353 \
   --dns-upstream 8.8.8.8:53
 
-# Step 2: Set up pf redirection (in another terminal)
+# Or run as a daemon
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns-listen 0.0.0.0:5353 \
+  -d
+
+# Step 2: Set up pf redirection (in another terminal, or same if using -d)
 sudo scripts/pf_setup.sh en0 8443 5353
 
 # Step 3: Configure client devices (see "Client Setup" below)
 
 # Step 4: When done, tear down
 sudo scripts/pf_teardown.sh
+# If running as daemon, stop it
+sudo kill $(cat /var/run/trans_proxy.pid)
 ```
 
 ## Usage
@@ -94,6 +103,19 @@ sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
   --dns-listen 0.0.0.0:5353 \
   --log-level debug
+
+# Run as a background daemon
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns-listen 0.0.0.0:5353 \
+  -d
+
+# Daemon with custom PID and log file
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns-listen 0.0.0.0:5353 \
+  -d --pid-file /tmp/trans_proxy.pid \
+  --log-file /tmp/trans_proxy.log
 ```
 
 ### CLI Options
@@ -105,6 +127,9 @@ sudo ./target/release/trans_proxy \
 | `--log-level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `--dns-listen` | *(disabled)* | Enable DNS forwarder on this address (e.g., `0.0.0.0:5353`) |
 | `--dns-upstream` | `8.8.8.8:53` | Upstream DNS server for the forwarder |
+| `-d` / `--daemon` | off | Run as a background daemon |
+| `--pid-file` | `/var/run/trans_proxy.pid` | PID file path (used with `--daemon`) |
+| `--log-file` | `/var/log/trans_proxy.log` (daemon) / stderr | Log file path |
 
 ### Setting up pf redirection
 
@@ -145,6 +170,31 @@ sudo scripts/pf_teardown.sh
 ```
 
 This flushes the anchor rules and disables IP forwarding. pf itself is left enabled — run `sudo pfctl -d` to disable it entirely.
+
+### Daemon Mode
+
+Run trans_proxy as a background process:
+
+```bash
+# Start as daemon
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns-listen 0.0.0.0:5353 \
+  -d
+
+# Check status
+cat /var/run/trans_proxy.pid
+tail -f /var/log/trans_proxy.log
+
+# Stop
+sudo kill $(cat /var/run/trans_proxy.pid)
+```
+
+In daemon mode:
+- The process forks into the background and detaches from the terminal
+- A PID file is written (default `/var/run/trans_proxy.pid`)
+- Logs are written to a file (default `/var/log/trans_proxy.log`) instead of stderr
+- The PID file is cleaned up on exit
 
 ### Client Setup
 

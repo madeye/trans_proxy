@@ -28,4 +28,16 @@ pub struct Config {
     /// Upstream DNS server to forward queries to (used with --dns-listen)
     #[arg(long, default_value = "8.8.8.8:53")]
     pub dns_upstream: std::net::SocketAddr,
+
+    /// Run as a background daemon
+    #[arg(long, short = 'd')]
+    pub daemon: bool,
+
+    /// PID file path (used with --daemon)
+    #[arg(long, default_value = "/var/run/trans_proxy.pid")]
+    pub pid_file: std::path::PathBuf,
+
+    /// Log file path (used with --daemon, defaults to stderr in foreground)
+    #[arg(long)]
+    pub log_file: Option<std::path::PathBuf>,
 }

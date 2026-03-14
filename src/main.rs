@@ -19,6 +19,7 @@
 //! ## Modules
 //!
 //! - [`config`] — CLI argument parsing via clap
+//! - [`daemon`] — Unix double-fork daemonization with PID file management
 //! - [`orig_dest`] — Original destination recovery using `DIOCNATLOOK` ioctl
 //! - [`sni`] — TLS ClientHello SNI extraction
 //! - [`dns`] — Local DNS forwarder with IP→domain mapping
@@ -28,11 +29,17 @@
 //! ## Usage
 //!
 //! ```bash
+//! # Foreground
 //! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 \
 //!     --dns-listen 0.0.0.0:5353
+//!
+//! # Daemon mode
+//! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 \
+//!     --dns-listen 0.0.0.0:5353 -d
 //! ```
 
 mod config;
+mod daemon;
 mod dns;
 mod orig_dest;
 mod proxy;
@@ -47,30 +54,73 @@ use tracing_subscriber::EnvFilter;
 use crate::config::Config;
 use crate::dns::DnsTable;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let config = Config::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_new(&config.log_level)
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
-    let dns_table = DnsTable::new();
-
-    // Start DNS forwarder if configured
-    if let Some(dns_listen) = config.dns_listen {
-        let table = dns_table.clone();
-        let upstream = config.dns_upstream;
-        tokio::spawn(async move {
-            if let Err(e) = dns::run(dns_listen, upstream, table).await {
-                tracing::error!("DNS forwarder failed: {:#}", e);
-            }
-        });
-        info!("DNS forwarder started on {}", dns_listen);
+    // Daemonize before starting the async runtime
+    if config.daemon {
+        daemon::daemonize(&config.pid_file)?;
     }
 
-    proxy::run(config, dns_table).await
+    // Set up logging — write to file in daemon mode, stderr otherwise
+    let filter = EnvFilter::try_new(&config.log_level)
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let log_file = config.log_file.clone().or_else(|| {
+        if config.daemon {
+            Some(std::path::PathBuf::from("/var/log/trans_proxy.log"))
+        } else {
+            None
+        }
+    });
+
+    if let Some(ref path) = log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| anyhow::anyhow!("Failed to open log file {}: {}", path.display(), e))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(file)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .init();
+    }
+
+    if config.daemon {
+        info!("Daemonized, PID file: {}", config.pid_file.display());
+    }
+
+    // Build and run the tokio runtime
+    let pid_file = config.pid_file.clone();
+    let is_daemon = config.daemon;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(async {
+        let dns_table = DnsTable::new();
+
+        if let Some(dns_listen) = config.dns_listen {
+            let table = dns_table.clone();
+            let upstream = config.dns_upstream;
+            tokio::spawn(async move {
+                if let Err(e) = dns::run(dns_listen, upstream, table).await {
+                    tracing::error!("DNS forwarder failed: {:#}", e);
+                }
+            });
+            info!("DNS forwarder started on {}", dns_listen);
+        }
+
+        proxy::run(config, dns_table).await
+    });
+
+    // Cleanup PID file
+    if is_daemon {
+        daemon::remove_pid_file(&pid_file);
+    }
+
+    result
 }

@@ -107,21 +107,9 @@
       overflow-x: auto;
     }
 
-    .diagram pre {
-      color: var(--text-muted);
-      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-      font-size: 0.85rem;
-      line-height: 1.8;
-      text-align: center;
-    }
-
-    .diagram pre .highlight {
-      color: var(--accent);
-      font-weight: 600;
-    }
-
-    .diagram pre .green {
-      color: var(--green);
+    .diagram svg {
+      display: block;
+      margin: 0 auto;
     }
 
     /* Sections */
@@ -395,16 +383,413 @@
         <a href="#quick-start" class="btn btn-secondary">Quick Start</a>
       </div>
 
-      <div class="diagram">
-        <pre>
-<span class="green">[Client devices]</span> ──gateway──&gt; <span class="highlight">[macOS pf rdr]</span> ──&gt; <span class="highlight">[trans_proxy :8443]</span>
-                                                        │
-                                                        ▼
-                                                <span class="green">[Upstream HTTP CONNECT proxy]</span>
-                                                        │
-                                                        ▼
-                                                <span class="green">[Original destination]</span></pre>
+      <div class="diagram" style="padding: 32px 16px;">
+        <svg id="arch-diagram" viewBox="0 0 840 440" xmlns="http://www.w3.org/2000/svg" style="width: 100%; max-width: 840px; height: auto;">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/>
+            </marker>
+            <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/>
+            </marker>
+            <marker id="arrow-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#30363d"/>
+            </marker>
+            <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#1f6feb" stop-opacity="0.15"/>
+              <stop offset="100%" stop-color="#58a6ff" stop-opacity="0.05"/>
+            </linearGradient>
+            <filter id="blur-glow" x="-100%" y="-100%" width="300%" height="300%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="4"/>
+            </filter>
+            <filter id="blur-trail" x="-100%" y="-100%" width="300%" height="300%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="6"/>
+            </filter>
+          </defs>
+
+          <!-- Background glow -->
+          <ellipse cx="580" cy="160" rx="200" ry="100" fill="url(#glow)"/>
+
+          <!-- ============ NODES ============ -->
+
+          <!-- Client Devices -->
+          <g>
+            <rect x="20" y="42" width="28" height="20" rx="2" fill="none" stroke="#3fb950" stroke-width="1.5"/>
+            <line x1="30" y1="62" x2="42" y2="62" stroke="#3fb950" stroke-width="1.5"/>
+            <rect x="58" y="32" width="16" height="28" rx="2" fill="none" stroke="#3fb950" stroke-width="1.5"/>
+            <rect x="84" y="38" width="24" height="18" rx="2" fill="none" stroke="#3fb950" stroke-width="1.5"/>
+            <line x1="90" y1="56" x2="102" y2="56" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="60" y="88" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Client Devices</text>
+          </g>
+
+          <!-- macOS pf rdr -->
+          <g>
+            <rect x="255" y="30" width="160" height="46" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+            <text x="335" y="58" text-anchor="middle" fill="#58a6ff" font-family="'SF Mono', monospace" font-size="13" font-weight="600">macOS pf rdr</text>
+          </g>
+
+          <!-- trans_proxy (main node) -->
+          <g>
+            <rect id="tp-glow-ring" x="512" y="19" width="226" height="66" rx="12" fill="none" stroke="#58a6ff" stroke-width="1" stroke-opacity="0.2"/>
+            <rect x="515" y="22" width="220" height="60" rx="10" fill="#161b22" stroke="#58a6ff" stroke-width="2"/>
+            <rect x="515" y="22" width="220" height="60" rx="10" fill="#1f6feb" fill-opacity="0.1"/>
+            <text x="625" y="50" text-anchor="middle" fill="#58a6ff" font-family="'SF Mono', monospace" font-size="15" font-weight="700">trans_proxy</text>
+            <text x="625" y="68" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">:8443</text>
+          </g>
+
+          <!-- Inner workings box -->
+          <rect x="460" y="110" width="350" height="180" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="635" y="134" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11" font-style="italic">inside trans_proxy</text>
+
+          <!-- DIOCNATLOOK -->
+          <g>
+            <rect id="node-diocnatlook" x="480" y="148" width="145" height="36" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+            <text x="552" y="171" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">DIOCNATLOOK</text>
+          </g>
+
+          <!-- SNI Extract -->
+          <g>
+            <rect id="node-sni" x="645" y="148" width="145" height="36" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+            <text x="717" y="171" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">SNI Extract</text>
+          </g>
+
+          <!-- DNS Table -->
+          <g>
+            <rect id="node-dns" x="480" y="200" width="145" height="36" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+            <text x="552" y="223" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">DNS Table</text>
+          </g>
+
+          <!-- CONNECT -->
+          <g>
+            <rect id="node-connect" x="645" y="200" width="145" height="36" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+            <text x="717" y="218" text-anchor="middle" fill="#58a6ff" font-family="'SF Mono', monospace" font-size="11" font-weight="600">CONNECT</text>
+            <text x="717" y="231" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="9">host:port</text>
+          </g>
+
+          <!-- Upstream Proxy -->
+          <g>
+            <rect x="500" y="332" width="270" height="46" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="635" y="360" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Upstream HTTP CONNECT Proxy</text>
+          </g>
+
+          <!-- Original Destination -->
+          <g>
+            <rect x="535" y="402" width="200" height="36" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="635" y="425" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Original Destination</text>
+          </g>
+
+          <!-- DNS Forwarder (side) -->
+          <g>
+            <rect x="30" y="180" width="170" height="46" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+            <text x="115" y="203" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="12">DNS Forwarder</text>
+            <text x="115" y="218" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="10">:5353</text>
+          </g>
+
+          <!-- ============ STATIC LINES & LABELS ============ -->
+
+          <line x1="125" y1="52" x2="248" y2="52" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,4"/>
+          <text x="186" y="42" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11">gateway</text>
+
+          <line x1="420" y1="52" x2="508" y2="52" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+          <text x="464" y="42" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11">rdr</text>
+
+          <line x1="625" y1="82" x2="625" y2="146" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <line x1="552" y1="184" x2="552" y2="198" stroke="#30363d" stroke-width="1" marker-end="url(#arrow-dim)"/>
+          <line x1="625" y1="166" x2="643" y2="166" stroke="#30363d" stroke-width="1"/>
+          <line x1="717" y1="184" x2="717" y2="198" stroke="#30363d" stroke-width="1" marker-end="url(#arrow-dim)"/>
+          <line x1="635" y1="290" x2="635" y2="328" stroke="#3fb950" stroke-width="2" marker-end="url(#arrow-green)"/>
+          <line x1="635" y1="378" x2="635" y2="400" stroke="#3fb950" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+          <line x1="200" y1="210" x2="478" y2="216" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrow-dim)" stroke-dasharray="4,3"/>
+          <text x="340" y="206" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="10">IP &rarr; domain</text>
+
+          <line x1="335" y1="76" x2="335" y2="152" stroke="#30363d" stroke-width="1" stroke-dasharray="4,3"/>
+          <line x1="335" y1="152" x2="478" y2="164" stroke="#30363d" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="370" y="118" fill="#8b949e" font-family="'SF Mono', monospace" font-size="10">/dev/pf</text>
+
+          <!-- Hidden paths for D3 motion -->
+          <path id="path-main" d="M 60,52 L 248,52 L 260,52 L 335,52 L 415,52 L 510,52 L 625,52 L 625,82 L 625,166 L 717,166 L 717,218 L 717,260 L 635,290 L 635,355 L 635,390 L 635,420" fill="none" stroke="none"/>
+          <path id="path-dns" d="M 115,226 L 200,210 L 478,216 L 552,218" fill="none" stroke="none"/>
+          <path id="path-pf" d="M 335,76 L 335,152 L 478,164 L 552,166" fill="none" stroke="none"/>
+
+          <!-- Animation layer (D3 appends here) -->
+          <g id="anim-layer"></g>
+        </svg>
       </div>
+
+      <script src="https://d3js.org/d3.v7.min.js"></script>
+      <script>
+      (function() {
+        const svg = d3.select('#arch-diagram');
+        const layer = svg.select('#anim-layer');
+
+        // Get path elements for motion
+        const mainPath = document.getElementById('path-main');
+        const dnsPath = document.getElementById('path-dns');
+        const pfPath = document.getElementById('path-pf');
+
+        const mainLen = mainPath.getTotalLength();
+        const dnsLen = dnsPath.getTotalLength();
+        const pfLen = pfPath.getTotalLength();
+
+        // Internal node highlight rects (by id)
+        const nodeIds = ['node-diocnatlook', 'node-sni', 'node-dns', 'node-connect'];
+        // Progress thresholds on the main path where each node should highlight
+        // These correspond to when the packet passes through each component
+        const nodeHighlights = [
+          { id: 'node-diocnatlook', enter: 0.42, exit: 0.50 },
+          { id: 'node-sni',         enter: 0.48, exit: 0.56 },
+          { id: 'node-dns',         enter: 0.52, exit: 0.60 },
+          { id: 'node-connect',     enter: 0.56, exit: 0.66 },
+        ];
+
+        // Create highlight overlays for internal nodes
+        nodeHighlights.forEach(nh => {
+          const node = document.getElementById(nh.id);
+          const x = +node.getAttribute('x');
+          const y = +node.getAttribute('y');
+          const w = +node.getAttribute('width');
+          const h = +node.getAttribute('height');
+          const rx = +node.getAttribute('rx') || 0;
+          layer.append('rect')
+            .attr('class', 'node-highlight')
+            .attr('data-node', nh.id)
+            .attr('x', x).attr('y', y)
+            .attr('width', w).attr('height', h)
+            .attr('rx', rx)
+            .attr('fill', '#58a6ff')
+            .attr('opacity', 0)
+            .style('pointer-events', 'none');
+        });
+
+        // Packet class: a glowing dot that moves along a path
+        class Packet {
+          constructor(path, pathLen, opts = {}) {
+            this.path = path;
+            this.pathLen = pathLen;
+            this.duration = opts.duration || 5000;
+            this.color = opts.color || '#58a6ff';
+            this.trailColor = opts.trailColor || this.color;
+            this.radius = opts.radius || 4;
+            this.trailCount = opts.trailCount || 6;
+            this.onProgress = opts.onProgress || null;
+            this.startOffset = opts.startOffset || 0;  // 0-1 start position on path
+            this.endOffset = opts.endOffset || 1;       // 0-1 end position on path
+            this.elements = [];
+            this._createElements();
+          }
+
+          _createElements() {
+            // Trail dots (rendered first = behind)
+            for (let i = this.trailCount; i >= 1; i--) {
+              const t = layer.append('circle')
+                .attr('r', this.radius * (1 - i * 0.12))
+                .attr('fill', this.trailColor)
+                .attr('opacity', 0)
+                .attr('filter', 'url(#blur-trail)')
+                .style('pointer-events', 'none');
+              this.elements.push({ el: t, offset: i });
+            }
+            // Main dot with glow
+            const glow = layer.append('circle')
+              .attr('r', this.radius * 2)
+              .attr('fill', this.color)
+              .attr('opacity', 0)
+              .attr('filter', 'url(#blur-glow)')
+              .style('pointer-events', 'none');
+            this.elements.push({ el: glow, offset: 0, isGlow: true });
+
+            const main = layer.append('circle')
+              .attr('r', this.radius)
+              .attr('fill', this.color)
+              .attr('opacity', 0)
+              .style('pointer-events', 'none');
+            this.elements.push({ el: main, offset: 0 });
+          }
+
+          update(progress) {
+            // progress: 0-1 within the packet's lifecycle
+            // Map to path range
+            const pathProgress = this.startOffset + progress * (this.endOffset - this.startOffset);
+
+            // Fade in/out
+            const fadeIn = Math.min(progress / 0.08, 1);
+            const fadeOut = Math.min((1 - progress) / 0.08, 1);
+            const alpha = Math.min(fadeIn, fadeOut);
+
+            this.elements.forEach(({ el, offset, isGlow }) => {
+              const trailProgress = Math.max(0, Math.min(1, pathProgress - offset * 0.015));
+              const dist = trailProgress * this.pathLen;
+              const pt = this.path.getPointAtLength(dist);
+
+              const trailAlpha = isGlow
+                ? alpha * 0.3
+                : offset === 0 ? alpha : alpha * (1 - offset * 0.15) * 0.5;
+
+              el.attr('cx', pt.x)
+                .attr('cy', pt.y)
+                .attr('opacity', trailAlpha);
+            });
+
+            // Trigger node highlights
+            if (this.onProgress) {
+              this.onProgress(pathProgress);
+            }
+          }
+
+          destroy() {
+            this.elements.forEach(({ el }) => el.remove());
+          }
+        }
+
+        // Manage spawning packets on a loop
+        class PacketStream {
+          constructor(path, pathLen, opts = {}) {
+            this.path = path;
+            this.pathLen = pathLen;
+            this.opts = opts;
+            this.interval = opts.interval || 3000;
+            this.packets = [];
+          }
+
+          spawn(now) {
+            const p = new Packet(this.path, this.pathLen, {
+              ...this.opts,
+              onProgress: this.opts.highlightNodes ? (progress) => {
+                nodeHighlights.forEach(nh => {
+                  const overlay = layer.select(`[data-node="${nh.id}"]`);
+                  if (progress >= nh.enter && progress <= nh.exit) {
+                    const local = (progress - nh.enter) / (nh.exit - nh.enter);
+                    const intensity = Math.sin(local * Math.PI) * 0.15;
+                    overlay.attr('opacity', intensity);
+                  }
+                });
+              } : null,
+            });
+            this.packets.push({ packet: p, startTime: now });
+          }
+
+          update(now) {
+            // Spawn new packets at interval
+            const last = this.packets.length > 0
+              ? this.packets[this.packets.length - 1].startTime
+              : -this.interval;
+            if (now - last >= this.interval) {
+              this.spawn(now);
+            }
+
+            // Update & cleanup
+            this.packets = this.packets.filter(({ packet, startTime }) => {
+              const elapsed = now - startTime;
+              const progress = elapsed / (this.opts.duration || 5000);
+              if (progress > 1) {
+                packet.destroy();
+                return false;
+              }
+              packet.update(progress);
+              return true;
+            });
+          }
+        }
+
+        // Clear node highlights each frame (will be re-set by active packets)
+        function clearHighlights() {
+          layer.selectAll('.node-highlight').attr('opacity', 0);
+        }
+
+        // Pulse the trans_proxy glow ring
+        const glowRing = d3.select('#tp-glow-ring');
+        function pulseGlow(now) {
+          const t = (Math.sin(now / 1500) + 1) / 2;
+          glowRing.attr('stroke-opacity', 0.1 + t * 0.3);
+        }
+
+        // Create packet streams
+        // Main traffic flow: full path, blue→green
+        const mainStream = new PacketStream(mainPath, mainLen, {
+          duration: 6000,
+          interval: 2200,
+          color: '#58a6ff',
+          trailColor: '#58a6ff',
+          radius: 4,
+          trailCount: 8,
+          highlightNodes: true,
+        });
+
+        // Secondary main stream (offset, slightly smaller)
+        const mainStream2 = new PacketStream(mainPath, mainLen, {
+          duration: 6500,
+          interval: 3400,
+          color: '#79c0ff',
+          trailColor: '#58a6ff',
+          radius: 3,
+          trailCount: 5,
+          highlightNodes: true,
+        });
+
+        // DNS mapping flow
+        const dnsStream = new PacketStream(dnsPath, dnsLen, {
+          duration: 3000,
+          interval: 4500,
+          color: '#8b949e',
+          trailColor: '#8b949e',
+          radius: 2.5,
+          trailCount: 4,
+        });
+
+        // /dev/pf lookup flow
+        const pfStream = new PacketStream(pfPath, pfLen, {
+          duration: 2500,
+          interval: 3800,
+          color: '#58a6ff',
+          trailColor: '#58a6ff',
+          radius: 2.5,
+          trailCount: 3,
+        });
+
+        // Color transition: packets change from blue to green as they exit trans_proxy
+        // We handle this by modifying fill dynamically in the main packet update
+        const origUpdate = Packet.prototype.update;
+        Packet.prototype.update = function(progress) {
+          origUpdate.call(this, progress);
+
+          // Color transition for main path packets
+          if (this.path === mainPath) {
+            const pathProgress = this.startOffset + progress * (this.endOffset - this.startOffset);
+            if (pathProgress > 0.7) {
+              const t = Math.min((pathProgress - 0.7) / 0.15, 1);
+              // Interpolate blue → green
+              const r = Math.round(88 + t * (63 - 88));
+              const g = Math.round(166 + t * (185 - 166));
+              const b = Math.round(255 + t * (80 - 255));
+              const color = `rgb(${r},${g},${b})`;
+              this.elements.forEach(({ el, offset }) => {
+                if (offset === 0) el.attr('fill', color);
+              });
+            }
+          }
+        };
+
+        // Animation loop
+        let startTime = null;
+        function animate(timestamp) {
+          if (!startTime) startTime = timestamp;
+          const now = timestamp - startTime;
+
+          clearHighlights();
+          pulseGlow(now);
+          mainStream.update(now);
+          mainStream2.update(now);
+          dnsStream.update(now);
+          pfStream.update(now);
+
+          requestAnimationFrame(animate);
+        }
+
+        // Start with a small delay so page renders first
+        setTimeout(() => requestAnimationFrame(animate), 200);
+      })();
+      </script>
     </div>
   </header>
 
@@ -430,12 +815,12 @@
           <p>Uses anchor-based pf rules so your existing firewall configuration is never touched or overwritten.</p>
         </div>
         <div class="feature">
-          <h3>Async I/O</h3>
-          <p>Built on tokio with per-connection task spawning. Handles many concurrent connections efficiently with bidirectional relay.</p>
+          <h3>Daemon Mode</h3>
+          <p>Run as a background process with PID file and log file support. Start with <code>-d</code>, stop with <code>kill</code>.</p>
         </div>
         <div class="feature">
-          <h3>Zero Config Files</h3>
-          <p>Everything is configured via CLI flags. No YAML, no TOML config files to manage. Just run it.</p>
+          <h3>Async I/O</h3>
+          <p>Built on tokio with per-connection task spawning. Handles many concurrent connections efficiently with bidirectional relay.</p>
         </div>
       </div>
     </div>
@@ -483,10 +868,15 @@
         <div class="step">
           <h3>Start the transparent proxy</h3>
           <p>Run with DNS interception enabled for full hostname resolution:</p>
-<pre class="code"><span class="cmd">sudo ./target/release/trans_proxy</span> \
+<pre class="code"><span class="comment"># Foreground</span>
+<span class="cmd">sudo ./target/release/trans_proxy</span> \
   <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
-  <span class="flag">--dns-listen</span> <span class="value">0.0.0.0:5353</span> \
-  <span class="flag">--dns-upstream</span> <span class="value">8.8.8.8:53</span></pre>
+  <span class="flag">--dns-listen</span> <span class="value">0.0.0.0:5353</span>
+
+<span class="comment"># Or as a daemon</span>
+<span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--dns-listen</span> <span class="value">0.0.0.0:5353</span> <span class="flag">-d</span></pre>
         </div>
 
         <div class="step">
@@ -507,7 +897,9 @@
 
         <div class="step">
           <h3>Tear down when done</h3>
-<pre class="code"><span class="cmd">sudo scripts/pf_teardown.sh</span></pre>
+<pre class="code"><span class="cmd">sudo scripts/pf_teardown.sh</span>
+<span class="comment"># If running as daemon</span>
+<span class="cmd">sudo kill</span> <span class="value">$(cat /var/run/trans_proxy.pid)</span></pre>
         </div>
       </div>
     </div>
@@ -550,6 +942,21 @@
             <td><code>--dns-upstream</code></td>
             <td>8.8.8.8:53</td>
             <td>Upstream DNS server for the forwarder</td>
+          </tr>
+          <tr>
+            <td><code>-d</code> / <code>--daemon</code></td>
+            <td>off</td>
+            <td>Run as a background daemon</td>
+          </tr>
+          <tr>
+            <td><code>--pid-file</code></td>
+            <td>/var/run/trans_proxy.pid</td>
+            <td>PID file path (used with <code>--daemon</code>)</td>
+          </tr>
+          <tr>
+            <td><code>--log-file</code></td>
+            <td>/var/log/trans_proxy.log (daemon)</td>
+            <td>Log file path (defaults to stderr in foreground)</td>
           </tr>
         </tbody>
       </table>
