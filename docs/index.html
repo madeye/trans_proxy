@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>trans_proxy — Transparent Proxy for macOS</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-dim: #1f6feb;
+      --green: #3fb950;
+      --code-bg: #0d1117;
+      --code-border: #30363d;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Hero */
+    .hero {
+      text-align: center;
+      padding: 80px 0 60px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .hero h1 {
+      font-size: 3rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+
+    .hero h1 code {
+      color: var(--accent);
+      background: none;
+      font-size: inherit;
+    }
+
+    .hero .tagline {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto 32px;
+    }
+
+    .hero-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 12px 24px;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.95rem;
+      transition: all 0.15s;
+    }
+
+    .btn-primary {
+      background: var(--accent-dim);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--text-muted);
+    }
+
+    /* Diagram */
+    .diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      margin: 40px 0;
+      overflow-x: auto;
+    }
+
+    .diagram pre {
+      color: var(--text-muted);
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.85rem;
+      line-height: 1.8;
+      text-align: center;
+    }
+
+    .diagram pre .highlight {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .diagram pre .green {
+      color: var(--green);
+    }
+
+    /* Sections */
+    section {
+      padding: 60px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    section:last-child {
+      border-bottom: none;
+    }
+
+    section h2 {
+      font-size: 1.75rem;
+      margin-bottom: 24px;
+      font-weight: 700;
+    }
+
+    /* Features */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 20px;
+    }
+
+    .feature {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+    }
+
+    .feature h3 {
+      font-size: 1.05rem;
+      margin-bottom: 8px;
+      color: var(--accent);
+    }
+
+    .feature p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* Code blocks */
+    pre.code {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      border-radius: 8px;
+      padding: 20px;
+      overflow-x: auto;
+      margin: 16px 0;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.85rem;
+      line-height: 1.7;
+    }
+
+    pre.code .comment { color: var(--text-muted); }
+    pre.code .cmd { color: var(--text); }
+    pre.code .flag { color: var(--accent); }
+    pre.code .value { color: var(--green); }
+
+    code {
+      background: var(--surface);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.88em;
+    }
+
+    /* Steps */
+    .steps {
+      counter-reset: step;
+    }
+
+    .step {
+      position: relative;
+      padding-left: 48px;
+      margin-bottom: 32px;
+    }
+
+    .step::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .step h3 {
+      font-size: 1.1rem;
+      margin-bottom: 8px;
+    }
+
+    .step p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 8px;
+    }
+
+    /* Table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 0.9rem;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    td code {
+      color: var(--accent);
+    }
+
+    /* How it works */
+    .flow-list {
+      list-style: none;
+      padding: 0;
+    }
+
+    .flow-list li {
+      position: relative;
+      padding: 12px 0 12px 24px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      border-left: 2px solid var(--border);
+      margin-left: 8px;
+    }
+
+    .flow-list li::before {
+      content: '';
+      position: absolute;
+      left: -5px;
+      top: 16px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .flow-list li:last-child {
+      border-left-color: transparent;
+    }
+
+    .flow-list li strong {
+      color: var(--text);
+    }
+
+    /* Client setup */
+    .client-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+
+    .client-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+    }
+
+    .client-card h4 {
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+    }
+
+    .client-card p {
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+
+    /* Troubleshooting */
+    .faq {
+      margin-top: 16px;
+    }
+
+    .faq-item {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+
+    .faq-item summary {
+      padding: 16px 20px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.95rem;
+      background: var(--surface);
+      list-style: none;
+    }
+
+    .faq-item summary::-webkit-details-marker { display: none; }
+
+    .faq-item summary::before {
+      content: '+ ';
+      color: var(--accent);
+      font-family: monospace;
+    }
+
+    .faq-item[open] summary::before {
+      content: '- ';
+    }
+
+    .faq-item .faq-body {
+      padding: 16px 20px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 40px 0;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 600px) {
+      .hero { padding: 48px 0 40px; }
+      .hero h1 { font-size: 2rem; }
+      .hero .tagline { font-size: 1rem; }
+      section { padding: 40px 0; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Hero -->
+  <header class="hero">
+    <div class="container">
+      <h1><code>trans_proxy</code></h1>
+      <p class="tagline">
+        A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy.
+      </p>
+      <div class="hero-buttons">
+        <a href="https://github.com/madeye/trans_proxy" class="btn btn-primary">View on GitHub</a>
+        <a href="#quick-start" class="btn btn-secondary">Quick Start</a>
+      </div>
+
+      <div class="diagram">
+        <pre>
+<span class="green">[Client devices]</span> ──gateway──&gt; <span class="highlight">[macOS pf rdr]</span> ──&gt; <span class="highlight">[trans_proxy :8443]</span>
+                                                        │
+                                                        ▼
+                                                <span class="green">[Upstream HTTP CONNECT proxy]</span>
+                                                        │
+                                                        ▼
+                                                <span class="green">[Original destination]</span></pre>
+      </div>
+    </div>
+  </header>
+
+  <!-- Features -->
+  <section>
+    <div class="container">
+      <h2>Features</h2>
+      <div class="features">
+        <div class="feature">
+          <h3>pf Integration</h3>
+          <p>Uses <code>DIOCNATLOOK</code> ioctl on <code>/dev/pf</code> to recover original destinations from pf's NAT state table &mdash; the same technique mitmproxy uses.</p>
+        </div>
+        <div class="feature">
+          <h3>SNI Extraction</h3>
+          <p>Peeks at the TLS ClientHello to extract hostnames, sending proper <code>CONNECT host:port</code> instead of raw IPs. No TLS termination or certificate generation needed.</p>
+        </div>
+        <div class="feature">
+          <h3>DNS Interception</h3>
+          <p>Optional local DNS forwarder that captures A record responses and builds an IP&rarr;domain lookup table for hostname resolution on non-TLS traffic.</p>
+        </div>
+        <div class="feature">
+          <h3>Safe pf Anchors</h3>
+          <p>Uses anchor-based pf rules so your existing firewall configuration is never touched or overwritten.</p>
+        </div>
+        <div class="feature">
+          <h3>Async I/O</h3>
+          <p>Built on tokio with per-connection task spawning. Handles many concurrent connections efficiently with bidirectional relay.</p>
+        </div>
+        <div class="feature">
+          <h3>Zero Config Files</h3>
+          <p>Everything is configured via CLI flags. No YAML, no TOML config files to manage. Just run it.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Requirements -->
+  <section>
+    <div class="container">
+      <h2>Requirements</h2>
+      <ul style="color: var(--text-muted); padding-left: 20px; font-size: 0.95rem; line-height: 2;">
+        <li>macOS 12+ (uses pf and <code>DIOCNATLOOK</code> ioctl)</li>
+        <li>Rust 1.70+ and Cargo</li>
+        <li>Root privileges (for <code>/dev/pf</code> access and pf rule management)</li>
+        <li>An upstream HTTP CONNECT proxy (e.g., Squid, privoxy, or any CONNECT-capable proxy)</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- Build -->
+  <section>
+    <div class="container">
+      <h2>Build</h2>
+<pre class="code"><span class="comment"># Clone the repository</span>
+<span class="cmd">git clone</span> <span class="value">https://github.com/madeye/trans_proxy.git</span>
+<span class="cmd">cd</span> <span class="value">trans_proxy</span>
+
+<span class="comment"># Build release binary</span>
+<span class="cmd">cargo build</span> <span class="flag">--release</span>
+
+<span class="comment"># Verify</span>
+<span class="cmd">cargo test</span>
+<span class="cmd">./target/release/trans_proxy</span> <span class="flag">--help</span></pre>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section id="quick-start">
+    <div class="container">
+      <h2>Quick Start</h2>
+      <p style="color: var(--text-muted); margin-bottom: 24px;">
+        This example assumes your upstream HTTP proxy runs on <code>127.0.0.1:1082</code> and your LAN interface is <code>en0</code>.
+      </p>
+
+      <div class="steps">
+        <div class="step">
+          <h3>Start the transparent proxy</h3>
+          <p>Run with DNS interception enabled for full hostname resolution:</p>
+<pre class="code"><span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--dns-listen</span> <span class="value">0.0.0.0:5353</span> \
+  <span class="flag">--dns-upstream</span> <span class="value">8.8.8.8:53</span></pre>
+        </div>
+
+        <div class="step">
+          <h3>Set up pf redirection</h3>
+          <p>In another terminal, install the pf rules:</p>
+<pre class="code"><span class="comment"># With DNS redirect (recommended)</span>
+<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443 5353</span>
+
+<span class="comment"># Without DNS redirect</span>
+<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span></pre>
+          <p>The script prints your gateway IP and setup summary.</p>
+        </div>
+
+        <div class="step">
+          <h3>Configure client devices</h3>
+          <p>Set the Mac's IP as the default gateway (and DNS server) on each client device.</p>
+        </div>
+
+        <div class="step">
+          <h3>Tear down when done</h3>
+<pre class="code"><span class="cmd">sudo scripts/pf_teardown.sh</span></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CLI Reference -->
+  <section>
+    <div class="container">
+      <h2>CLI Reference</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Flag</th>
+            <th>Default</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>--listen-addr</code></td>
+            <td>0.0.0.0:8443</td>
+            <td>Address and port the proxy listens on</td>
+          </tr>
+          <tr>
+            <td><code>--upstream-proxy</code></td>
+            <td><em>required</em></td>
+            <td>Upstream HTTP CONNECT proxy address</td>
+          </tr>
+          <tr>
+            <td><code>--log-level</code></td>
+            <td>info</td>
+            <td>Log verbosity: trace, debug, info, warn, error</td>
+          </tr>
+          <tr>
+            <td><code>--dns-listen</code></td>
+            <td><em>disabled</em></td>
+            <td>Enable DNS forwarder on this address</td>
+          </tr>
+          <tr>
+            <td><code>--dns-upstream</code></td>
+            <td>8.8.8.8:53</td>
+            <td>Upstream DNS server for the forwarder</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 style="margin-top: 32px;">pf Scripts</h3>
+<pre class="code"><span class="comment"># Setup: pf_setup.sh &lt;interface&gt; [proxy_port] [dns_port]</span>
+<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443 5353</span>
+
+<span class="comment"># Teardown: flushes anchor rules, disables IP forwarding</span>
+<span class="cmd">sudo scripts/pf_teardown.sh</span></pre>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section>
+    <div class="container">
+      <h2>How It Works</h2>
+
+      <h3 style="margin-bottom: 16px;">Traffic Flow</h3>
+      <ol class="flow-list">
+        <li><strong>Client</strong> sends a packet to <code>example.com:443</code> (resolved to <code>93.184.216.34</code>)</li>
+        <li><strong>Packet arrives</strong> on the Mac's LAN interface (the Mac is the gateway)</li>
+        <li><strong>pf rdr rule</strong> rewrites the destination to <code>127.0.0.1:8443</code></li>
+        <li><strong>trans_proxy</strong> accepts the connection</li>
+        <li><strong>DIOCNATLOOK</strong> ioctl recovers the original destination (<code>93.184.216.34:443</code>) from pf's NAT state table</li>
+        <li><strong>SNI extraction</strong> peeks at the TLS ClientHello to read the hostname (<code>example.com</code>)</li>
+        <li>Sends <strong><code>CONNECT example.com:443</code></strong> to the upstream proxy</li>
+        <li><strong>Bidirectional relay</strong> between client and upstream proxy</li>
+      </ol>
+
+      <h3 style="margin-top: 32px; margin-bottom: 16px;">Hostname Resolution Chain</h3>
+      <div class="features" style="grid-template-columns: repeat(3, 1fr);">
+        <div class="feature">
+          <h3>1. SNI</h3>
+          <p>Extracted from TLS ClientHello. Works for HTTPS (port 443). No TLS termination needed.</p>
+        </div>
+        <div class="feature">
+          <h3>2. DNS Table</h3>
+          <p>IP&rarr;domain mapping from intercepted DNS A records. Works for HTTP and HTTPS. Requires <code>--dns-listen</code>.</p>
+        </div>
+        <div class="feature">
+          <h3>3. Raw IP</h3>
+          <p>Falls back to the IP address if no hostname can be determined. Always available.</p>
+        </div>
+      </div>
+
+      <h3 style="margin-top: 32px; margin-bottom: 12px;">Why DIOCNATLOOK?</h3>
+      <p style="color: var(--text-muted); font-size: 0.9rem;">
+        macOS pf's <code>rdr</code> rules rewrite the destination address <em>before</em> the socket layer sees it.
+        <code>getsockname()</code> on the accepted connection returns the proxy's own address, not the original destination.
+        The <code>DIOCNATLOOK</code> ioctl queries pf's NAT state table to recover the original destination &mdash;
+        this is the same approach used by mitmproxy.
+      </p>
+    </div>
+  </section>
+
+  <!-- Client Setup -->
+  <section>
+    <div class="container">
+      <h2>Client Setup</h2>
+      <p style="color: var(--text-muted); margin-bottom: 16px;">
+        On each device you want to route through the proxy, set the Mac's IP as the default gateway and DNS server.
+      </p>
+
+      <div class="client-grid">
+        <div class="client-card">
+          <h4>macOS / iOS</h4>
+          <p>Settings &rarr; Wi-Fi &rarr; (i) &rarr; Configure IP &rarr; Manual &rarr; Router &amp; DNS: gateway IP</p>
+        </div>
+        <div class="client-card">
+          <h4>Windows</h4>
+          <p>Settings &rarr; Network &rarr; Wi-Fi &rarr; Properties &rarr; Edit IP &rarr; Manual &rarr; Gateway &amp; DNS: gateway IP</p>
+        </div>
+        <div class="client-card">
+          <h4>Linux</h4>
+          <p><code>sudo ip route replace default via &lt;ip&gt;</code> and update <code>/etc/resolv.conf</code></p>
+        </div>
+        <div class="client-card">
+          <h4>Android</h4>
+          <p>Wi-Fi &rarr; Long press &rarr; Modify &rarr; Advanced &rarr; Static IP &rarr; Gateway &amp; DNS: gateway IP</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Troubleshooting -->
+  <section>
+    <div class="container">
+      <h2>Troubleshooting</h2>
+      <div class="faq">
+        <details class="faq-item">
+          <summary>"Failed to open /dev/pf"</summary>
+          <div class="faq-body">Run with <code>sudo</code>. The proxy needs root to access <code>/dev/pf</code>.</div>
+        </details>
+        <details class="faq-item">
+          <summary>"No ALTQ support in kernel"</summary>
+          <div class="faq-body">This is a harmless warning from <code>pfctl</code>. macOS doesn't include ALTQ. pf redirection works fine without it.</div>
+        </details>
+        <details class="faq-item">
+          <summary>"DIOCNATLOOK failed"</summary>
+          <div class="faq-body">
+            Ensure pf rules are loaded: <code>sudo pfctl -a trans_proxy -s rules</code><br>
+            Ensure pf is enabled: <code>sudo pfctl -s info | head -1</code><br>
+            Check that traffic is arriving on the expected interface.
+          </div>
+        </details>
+        <details class="faq-item">
+          <summary>Connections hang or timeout</summary>
+          <div class="faq-body">
+            Verify the upstream proxy is running and accepts CONNECT requests.<br>
+            Use <code>--log-level debug</code> for detailed per-connection logging.<br>
+            Ensure IP forwarding is enabled: <code>sysctl net.inet.ip.forwarding</code> (should be 1).
+          </div>
+        </details>
+        <details class="faq-item">
+          <summary>DNS not resolving on client devices</summary>
+          <div class="faq-body">
+            Ensure <code>--dns-listen</code> is set and the DNS forwarder is running.<br>
+            Ensure pf is redirecting port 53: <code>sudo pfctl -a trans_proxy -s rules</code><br>
+            Test directly: <code>dig @&lt;gateway_ip&gt; -p 5353 example.com</code>
+          </div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>
+        <a href="https://github.com/madeye/trans_proxy">GitHub</a> &middot;
+        <a href="https://github.com/madeye/trans_proxy/blob/main/LICENSE">MIT License</a> &middot;
+        &copy; 2026 Max Lv
+      </p>
+    </div>
+  </footer>
+
+</body>
+</html>
