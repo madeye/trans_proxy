@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#79c0ff"/>
+      <stop offset="100%" stop-color="#1f6feb"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7ee787"/>
+      <stop offset="100%" stop-color="#3fb950"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="8"/>
+    </filter>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="96" fill="none" stroke="#30363d" stroke-width="2"/>
+
+  <!-- Glow behind center shield -->
+  <ellipse cx="256" cy="248" rx="100" ry="100" fill="#1f6feb" opacity="0.12" filter="url(#glow)"/>
+
+  <!-- Shield / proxy shape (center) -->
+  <path d="M 256 108 L 336 148 L 336 248 C 336 308 296 358 256 378 C 216 358 176 308 176 248 L 176 148 Z"
+        fill="none" stroke="url(#blue)" stroke-width="10" stroke-linejoin="round"/>
+
+  <!-- Arrow entering shield from left -->
+  <g>
+    <!-- Incoming line -->
+    <line x1="68" y1="200" x2="176" y2="200" stroke="url(#blue)" stroke-width="8" stroke-linecap="round"/>
+    <!-- Arrowhead -->
+    <polygon points="168,186 190,200 168,214" fill="#58a6ff"/>
+    <!-- Incoming dots (3 small circles) -->
+    <circle cx="88" cy="200" r="5" fill="#79c0ff" opacity="0.5"/>
+    <circle cx="108" cy="200" r="5" fill="#79c0ff" opacity="0.7"/>
+    <circle cx="128" cy="200" r="5" fill="#79c0ff" opacity="0.9"/>
+  </g>
+
+  <!-- Arrow exiting shield downward-right -->
+  <g>
+    <!-- Outgoing line -->
+    <line x1="296" y1="310" x2="400" y2="390" stroke="url(#green)" stroke-width="8" stroke-linecap="round"/>
+    <!-- Arrowhead -->
+    <polygon points="406,378 410,400 388,388" fill="#3fb950"/>
+    <!-- Outgoing dots -->
+    <circle cx="320" cy="328" r="5" fill="#7ee787" opacity="0.5"/>
+    <circle cx="344" cy="348" r="5" fill="#7ee787" opacity="0.7"/>
+    <circle cx="368" cy="368" r="5" fill="#7ee787" opacity="0.9"/>
+  </g>
+
+  <!-- Inner lock/keyhole → represents transparency/passthrough -->
+  <circle cx="256" cy="220" r="24" fill="none" stroke="#58a6ff" stroke-width="6"/>
+  <rect x="246" y="238" width="20" height="28" rx="4" fill="#58a6ff"/>
+
+  <!-- Small "T" letter watermark -->
+  <text x="256" y="430" text-anchor="middle" fill="#30363d" font-family="-apple-system, sans-serif" font-size="48" font-weight="700">TP</text>
+</svg>
