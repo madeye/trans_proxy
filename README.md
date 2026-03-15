@@ -18,7 +18,7 @@ Designed to run on a Mac acting as a side router (gateway) for other devices on 
 
 - **pf integration** — Uses `DIOCNATLOOK` ioctl on `/dev/pf` to recover original destinations from pf's NAT state table
 - **SNI extraction** — Peeks at TLS ClientHello to extract hostnames, sending proper `CONNECT host:port` instead of raw IPs
-- **DNS interception** — Optional local DNS forwarder that builds an IP→domain lookup table as a fallback for hostname resolution (supports both traditional UDP and DNS-over-HTTPS)
+- **DNS forwarder** — Listens directly on the gateway interface (port 53) for LAN client DNS queries, building an IP→domain lookup table. Supports DNS-over-HTTPS (DoH) and traditional UDP upstream.
 - **Anchor-based pf rules** — Won't clobber your existing firewall config
 - **Daemon mode** — Run as a background process with PID file and log file support
 - **Async I/O** — Built on tokio with per-connection task spawning
@@ -27,7 +27,7 @@ Designed to run on a Mac acting as a side router (gateway) for other devices on 
 
 - macOS 12+ (uses pf and `DIOCNATLOOK` ioctl)
 - Rust 1.70+ and Cargo
-- Root privileges (for `/dev/pf` access and pf rule management)
+- Root privileges (for `/dev/pf` access and port 53 binding)
 - An upstream HTTP CONNECT proxy (e.g., Squid, mitmproxy, or any CONNECT-capable proxy)
 
 ## Build
@@ -57,19 +57,18 @@ cargo test
 This example assumes your upstream HTTP proxy runs on `127.0.0.1:1082` and your LAN interface is `en0`.
 
 ```bash
-# Step 1: Start the transparent proxy with DNS interception (DoH by default)
+# Step 1: Start the transparent proxy with DNS on the gateway interface
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
-  --dns-listen 0.0.0.0:5353
+  --dns
 
 # Or run as a daemon
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
-  --dns-listen 0.0.0.0:5353 \
-  -d
+  --dns -d
 
 # Step 2: Set up pf redirection (in another terminal, or same if using -d)
-sudo scripts/pf_setup.sh en0 8443 5353
+sudo scripts/pf_setup.sh en0 8443
 
 # Step 3: Configure client devices (see "Client Setup" below)
 
@@ -86,45 +85,44 @@ sudo kill $(cat /var/run/trans_proxy.pid)
 The proxy requires root to open `/dev/pf` for NAT lookups:
 
 ```bash
-# Minimal — proxy only, no DNS interception
+# Minimal — proxy only, no DNS
 sudo ./target/release/trans_proxy \
   --upstream-proxy <proxy_host>:<proxy_port>
 
-# Full — with DNS interception (uses Cloudflare DoH by default)
+# With DNS on the gateway interface (auto-detects en0 IP, listens on port 53)
 sudo ./target/release/trans_proxy \
   --upstream-proxy <proxy_host>:<proxy_port> \
-  --dns-listen 0.0.0.0:5353
+  --dns
+
+# Specify a different interface
+sudo ./target/release/trans_proxy \
+  --upstream-proxy <proxy_host>:<proxy_port> \
+  --dns --interface en1
+
+# Override DNS listen address manually
+sudo ./target/release/trans_proxy \
+  --upstream-proxy <proxy_host>:<proxy_port> \
+  --dns-listen 192.168.1.42:53
 
 # Use a specific DoH provider
 sudo ./target/release/trans_proxy \
   --upstream-proxy <proxy_host>:<proxy_port> \
-  --dns-listen 0.0.0.0:5353 \
-  --dns-upstream https://dns.google/dns-query
+  --dns --dns-upstream https://dns.google/dns-query
 
 # Use traditional UDP DNS instead of DoH
 sudo ./target/release/trans_proxy \
   --upstream-proxy <proxy_host>:<proxy_port> \
-  --dns-listen 0.0.0.0:5353 \
-  --dns-upstream 8.8.8.8:53
-
-# Custom listen address and debug logging
-sudo ./target/release/trans_proxy \
-  --listen-addr 0.0.0.0:9999 \
-  --upstream-proxy 127.0.0.1:1082 \
-  --dns-listen 0.0.0.0:5353 \
-  --log-level debug
+  --dns --dns-upstream 8.8.8.8:53
 
 # Run as a background daemon
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
-  --dns-listen 0.0.0.0:5353 \
-  -d
+  --dns -d
 
 # Daemon with custom PID and log file
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
-  --dns-listen 0.0.0.0:5353 \
-  -d --pid-file /tmp/trans_proxy.pid \
+  --dns -d --pid-file /tmp/trans_proxy.pid \
   --log-file /tmp/trans_proxy.log
 ```
 
@@ -135,7 +133,9 @@ sudo ./target/release/trans_proxy \
 | `--listen-addr` | `0.0.0.0:8443` | Address and port the proxy listens on |
 | `--upstream-proxy` | *(required)* | Upstream HTTP CONNECT proxy address (`host:port`) |
 | `--log-level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
-| `--dns-listen` | *(disabled)* | Enable DNS forwarder on this address (e.g., `0.0.0.0:5353`) |
+| `--dns` | off | Enable DNS forwarder on the gateway interface (port 53) |
+| `--interface` | `en0` | Network interface for DNS auto-detection (used with `--dns`) |
+| `--dns-listen` | *(auto)* | Override DNS listen address (e.g., `192.168.1.42:53`) |
 | `--dns-upstream` | `https://cloudflare-dns.com/dns-query` | Upstream DNS: `host:port` for UDP, or `https://` URL for DoH |
 | `-d` / `--daemon` | off | Run as a background daemon |
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID file path (used with `--daemon`) |
@@ -143,16 +143,13 @@ sudo ./target/release/trans_proxy \
 
 ### Setting up pf redirection
 
-The included scripts manage pf rules via an anchor (won't interfere with existing firewall rules):
+The included scripts manage pf rules via an anchor (won't interfere with existing firewall rules).
+DNS no longer needs pf redirection — trans_proxy listens directly on port 53.
 
 ```bash
-# Redirect HTTP/HTTPS only
+# Set up HTTP/HTTPS redirection
 sudo scripts/pf_setup.sh <interface> [proxy_port]
 sudo scripts/pf_setup.sh en0 8443
-
-# Redirect HTTP/HTTPS + DNS
-sudo scripts/pf_setup.sh <interface> [proxy_port] [dns_port]
-sudo scripts/pf_setup.sh en0 8443 5353
 ```
 
 The setup script prints the gateway IP and configuration summary:
@@ -166,7 +163,7 @@ The setup script prints the gateway IP and configuration summary:
 Done.
   Gateway IP:  192.168.1.42 (en0)
   HTTP/HTTPS:  ports 80,443 -> 127.0.0.1:8443
-  DNS:         port 53 -> 127.0.0.1:5353
+  DNS:         use --dns flag to listen on 192.168.1.42:53 directly
 
 Configure client devices to use 192.168.1.42 as their gateway.
 Set DNS server to 192.168.1.42 on client devices.
@@ -189,8 +186,7 @@ Run trans_proxy as a background process:
 # Start as daemon
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
-  --dns-listen 0.0.0.0:5353 \
-  -d
+  --dns -d
 
 # Check status
 cat /var/run/trans_proxy.pid
@@ -211,7 +207,7 @@ In daemon mode:
 On each device you want to route through the proxy:
 
 1. **Set the default gateway** to the Mac's IP address (shown by the setup script)
-2. **Set the DNS server** to the Mac's IP address (if using `--dns-listen`)
+2. **Set the DNS server** to the Mac's IP address (if using `--dns`)
 
 #### macOS / iOS
 Settings → Wi-Fi → (i) → Configure IP → Manual → Router: `<gateway_ip>`, DNS: `<gateway_ip>`
@@ -246,7 +242,7 @@ Settings → Wi-Fi → Long press network → Modify → Advanced → IP setting
 The proxy resolves hostnames for CONNECT requests using a fallback chain:
 
 1. **SNI extraction** — Parses the TLS ClientHello to read the Server Name Indication extension (port 443 only). No TLS termination or certificate generation required.
-2. **DNS table lookup** — If `--dns-listen` is enabled, the built-in DNS forwarder records IP→domain mappings from A record responses. Works for both HTTP (port 80) and HTTPS (port 443).
+2. **DNS table lookup** — If `--dns` is enabled, the built-in DNS forwarder records IP→domain mappings from A record responses. Works for both HTTP (port 80) and HTTPS (port 443).
 3. **Raw IP** — Falls back to the IP address if no hostname can be determined.
 
 ### Why DIOCNATLOOK?
@@ -272,9 +268,9 @@ This is a harmless warning from `pfctl`. macOS doesn't include ALTQ — pf redir
 - Ensure IP forwarding is enabled: `sysctl net.inet.ip.forwarding` (should be `1`)
 
 ### DNS not resolving on client devices
-- Ensure `--dns-listen` is set and the DNS forwarder is running
-- Ensure pf is redirecting port 53: `sudo pfctl -a trans_proxy -s rules`
-- Test: `dig @<gateway_ip> -p 5353 example.com`
+- Ensure `--dns` is set and the DNS forwarder is running
+- Check that trans_proxy logs show `DNS forwarder listening on <ip>:53`
+- Test: `dig @<gateway_ip> example.com`
 
 ## License
 

@@ -158,17 +158,27 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
             let query_name = &clients[0].1;
 
             // Parse A records from the response and populate the table
-            if let Some(ips) = parse_a_records(packet) {
+            let resolved_ips = parse_a_records(packet);
+            if let Some(ref ips) = resolved_ips {
                 for ip in ips {
-                    debug!("DNS: {} -> {}", ip, query_name);
-                    resp_table.insert(ip, query_name.clone());
+                    debug!("DNS resolved: {} -> {}", query_name, ip);
+                    resp_table.insert(*ip, query_name.clone());
                 }
             }
+
+            let client_addrs: Vec<_> = clients.iter().map(|(addr, _)| addr.to_string()).collect();
+            info!(
+                "DNS response: {} -> {} (tx_id=0x{:04x}, clients={})",
+                query_name,
+                resolved_ips.as_ref().map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "no A records".into()),
+                tx_id,
+                client_addrs.join(",")
+            );
 
             // Forward response back to all matching clients
             for (client_addr, _) in &clients {
                 if let Err(e) = resp_socket.send_to(packet, client_addr).await {
-                    debug!("DNS: failed to send response to {}: {}", client_addr, e);
+                    warn!("DNS: failed to send response to {}: {}", client_addr, e);
                 }
             }
         }
@@ -189,6 +199,8 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
         // Extract the query name for later use
         let query_name = parse_query_name(packet).unwrap_or_default();
 
+        debug!("DNS query from {}: {} (tx_id=0x{:04x})", client_addr, query_name, tx_id);
+
         // Store pending query keyed by (tx_id, client_addr) to avoid collisions
         if let Ok(mut map) = pending.write() {
             map.insert((tx_id, client_addr), query_name);
@@ -196,7 +208,7 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
 
         // Forward to upstream
         if let Err(e) = upstream_socket.send(packet).await {
-            debug!("DNS: failed to forward query to upstream: {}", e);
+            warn!("DNS: failed to forward query to upstream: {}", e);
         }
     }
 }
@@ -228,6 +240,8 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
 
         let query_name = parse_query_name(&packet).unwrap_or_default();
 
+        debug!("DNS query from {}: {} (DoH)", client_addr, query_name);
+
         let socket = Arc::clone(&socket);
         let client = client.clone();
         let doh_url = doh_url.clone();
@@ -237,20 +251,28 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
             match doh_query(&client, &doh_url, &packet).await {
                 Ok(response) => {
                     // Parse A records and populate the table
-                    if let Some(ips) = parse_a_records(&response) {
-                        for ip in &ips {
-                            debug!("DNS (DoH): {} -> {}", ip, query_name);
+                    let resolved_ips = parse_a_records(&response);
+                    if let Some(ref ips) = resolved_ips {
+                        for ip in ips {
+                            debug!("DNS resolved: {} -> {} (DoH)", query_name, ip);
                             table.insert(*ip, query_name.clone());
                         }
                     }
 
+                    info!(
+                        "DNS response (DoH): {} -> {} (client={})",
+                        query_name,
+                        resolved_ips.as_ref().map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "no A records".into()),
+                        client_addr
+                    );
+
                     // Send response back to client
                     if let Err(e) = socket.send_to(&response, client_addr).await {
-                        debug!("DNS: failed to send DoH response to {}: {}", client_addr, e);
+                        warn!("DNS: failed to send DoH response to {}: {}", client_addr, e);
                     }
                 }
                 Err(e) => {
-                    debug!("DoH query for {} failed: {:#}", query_name, e);
+                    warn!("DoH query for {} failed: {:#}", query_name, e);
                 }
             }
         });
@@ -448,5 +470,88 @@ mod tests {
         pkt[2] = 0x81;
         pkt[3] = 0x80;
         assert_eq!(parse_a_records(&pkt), None);
+    }
+
+    /// Build a minimal DNS query for a domain name.
+    fn build_dns_query(domain: &str, tx_id: u16) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&tx_id.to_be_bytes()); // TX ID
+        pkt.extend_from_slice(&[0x01, 0x00]); // flags: standard query
+        pkt.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+        pkt.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
+        pkt.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
+        pkt.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0
+        for label in domain.split('.') {
+            pkt.push(label.len() as u8);
+            pkt.extend_from_slice(label.as_bytes());
+        }
+        pkt.push(0x00);
+        pkt.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+        pkt.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+        pkt
+    }
+
+    /// Integration test: runs the UDP DNS forwarder with a fake upstream,
+    /// sends a query, and verifies the full code path executes (including log statements).
+    #[tokio::test]
+    async fn test_dns_udp_query_response_logging() {
+        // Set up tracing so debug! calls execute
+        let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).try_init();
+
+        // Bind a fake upstream DNS server
+        let fake_upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fake_upstream_addr = fake_upstream.local_addr().unwrap();
+
+        // Create DNS table and start forwarder
+        let table = DnsTable::new();
+        let forwarder_table = table.clone();
+        let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        // Bind the forwarder listener manually to get the port
+        let forwarder_socket = UdpSocket::bind(listen_addr).await.unwrap();
+        let forwarder_addr = forwarder_socket.local_addr().unwrap();
+        drop(forwarder_socket);
+
+        // Start the DNS forwarder
+        let forwarder = tokio::spawn(async move {
+            let _ = run_udp(forwarder_addr, fake_upstream_addr, forwarder_table).await;
+        });
+
+        // Give the forwarder time to bind
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send a DNS query from a "client"
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let query = build_dns_query("example.com", 0xABCD);
+        client_socket.send_to(&query, forwarder_addr).await.unwrap();
+
+        // Fake upstream receives the forwarded query
+        let mut buf = vec![0u8; MAX_DNS_PACKET];
+        let (n, from_addr) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fake_upstream.recv_from(&mut buf),
+        ).await.unwrap().unwrap();
+
+        // Verify the query was forwarded
+        assert!(n >= 12);
+        assert_eq!(parse_query_name(&buf[..n]), Some("example.com".to_string()));
+
+        // Send a fake response back
+        let response = build_dns_response("example.com", Ipv4Addr::new(93, 184, 216, 34));
+        fake_upstream.send_to(&response, from_addr).await.unwrap();
+
+        // Client should receive the response
+        let (n, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client_socket.recv_from(&mut buf),
+        ).await.unwrap().unwrap();
+        assert!(n >= 12);
+
+        // Verify the DNS table was populated (proves the info!/debug! code paths ran)
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let resolved = table.lookup(&Ipv4Addr::new(93, 184, 216, 34));
+        assert_eq!(resolved, Some("example.com".to_string()));
+
+        forwarder.abort();
     }
 }

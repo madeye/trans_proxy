@@ -506,7 +506,7 @@
           <g>
             <rect x="30" y="180" width="170" height="46" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
             <text x="115" y="203" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="12">DNS Forwarder</text>
-            <text x="115" y="218" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="10">:5353</text>
+            <text x="115" y="218" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="10">:53</text>
           </g>
 
           <!-- ============ STATIC LINES & LABELS ============ -->
@@ -831,8 +831,8 @@
           <p>Peeks at the TLS ClientHello to extract hostnames, sending proper <code>CONNECT host:port</code> instead of raw IPs. No TLS termination or certificate generation needed.</p>
         </div>
         <div class="feature">
-          <h3>DNS Interception</h3>
-          <p>Optional local DNS forwarder that captures A record responses and builds an IP&rarr;domain lookup table. Supports DNS-over-HTTPS (DoH) and traditional UDP upstream.</p>
+          <h3>DNS Forwarder</h3>
+          <p>Listens directly on the gateway interface (port 53) for LAN client DNS queries. Builds an IP&rarr;domain lookup table. Supports DoH and UDP upstream.</p>
         </div>
         <div class="feature">
           <h3>Safe pf Anchors</h3>
@@ -891,26 +891,22 @@
       <div class="steps">
         <div class="step">
           <h3>Start the transparent proxy</h3>
-          <p>Run with DNS interception enabled (uses Cloudflare DoH by default):</p>
-<pre class="code"><span class="comment"># Foreground</span>
+          <p>Run with DNS on the gateway interface (uses Cloudflare DoH by default):</p>
+<pre class="code"><span class="comment"># Foreground (auto-detects en0 IP, listens on port 53)</span>
 <span class="cmd">sudo ./target/release/trans_proxy</span> \
   <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
-  <span class="flag">--dns-listen</span> <span class="value">0.0.0.0:5353</span>
+  <span class="flag">--dns</span>
 
 <span class="comment"># Or as a daemon</span>
 <span class="cmd">sudo ./target/release/trans_proxy</span> \
   <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
-  <span class="flag">--dns-listen</span> <span class="value">0.0.0.0:5353</span> <span class="flag">-d</span></pre>
+  <span class="flag">--dns</span> <span class="flag">-d</span></pre>
         </div>
 
         <div class="step">
           <h3>Set up pf redirection</h3>
-          <p>In another terminal, install the pf rules:</p>
-<pre class="code"><span class="comment"># With DNS redirect (recommended)</span>
-<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443 5353</span>
-
-<span class="comment"># Without DNS redirect</span>
-<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span></pre>
+          <p>In another terminal, install the pf rules (HTTP/HTTPS only &mdash; DNS is handled directly):</p>
+<pre class="code"><span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span></pre>
           <p>The script prints your gateway IP and setup summary.</p>
         </div>
 
@@ -958,9 +954,19 @@
             <td>Log verbosity: trace, debug, info, warn, error</td>
           </tr>
           <tr>
+            <td><code>--dns</code></td>
+            <td>off</td>
+            <td>Enable DNS forwarder on the gateway interface (port 53)</td>
+          </tr>
+          <tr>
+            <td><code>--interface</code></td>
+            <td>en0</td>
+            <td>Network interface for DNS auto-detection</td>
+          </tr>
+          <tr>
             <td><code>--dns-listen</code></td>
-            <td><em>disabled</em></td>
-            <td>Enable DNS forwarder on this address</td>
+            <td><em>auto</em></td>
+            <td>Override DNS listen address (e.g., <code>192.168.1.42:53</code>)</td>
           </tr>
           <tr>
             <td><code>--dns-upstream</code></td>
@@ -986,8 +992,9 @@
       </table>
 
       <h3 style="margin-top: 32px;">pf Scripts</h3>
-<pre class="code"><span class="comment"># Setup: pf_setup.sh &lt;interface&gt; [proxy_port] [dns_port]</span>
-<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443 5353</span>
+<pre class="code"><span class="comment"># Setup: pf_setup.sh &lt;interface&gt; [proxy_port]</span>
+<span class="comment"># DNS no longer needs pf redirection &mdash; listens on port 53 directly</span>
+<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span>
 
 <span class="comment"># Teardown: flushes anchor rules, disables IP forwarding</span>
 <span class="cmd">sudo scripts/pf_teardown.sh</span></pre>
@@ -1019,7 +1026,7 @@
         </div>
         <div class="feature">
           <h3>2. DNS Table</h3>
-          <p>IP&rarr;domain mapping from intercepted DNS responses (via DoH or UDP). Works for HTTP and HTTPS. Requires <code>--dns-listen</code>.</p>
+          <p>IP&rarr;domain mapping from DNS responses (via DoH or UDP). Works for HTTP and HTTPS. Requires <code>--dns</code>.</p>
         </div>
         <div class="feature">
           <h3>3. Raw IP</h3>
@@ -1098,9 +1105,9 @@
         <details class="faq-item">
           <summary>DNS not resolving on client devices</summary>
           <div class="faq-body">
-            Ensure <code>--dns-listen</code> is set and the DNS forwarder is running.<br>
-            Ensure pf is redirecting port 53: <code>sudo pfctl -a trans_proxy -s rules</code><br>
-            Test directly: <code>dig @&lt;gateway_ip&gt; -p 5353 example.com</code>
+            Ensure <code>--dns</code> is set and the DNS forwarder is running.<br>
+            Check that trans_proxy logs show <code>DNS forwarder listening on &lt;ip&gt;:53</code>.<br>
+            Test directly: <code>dig @&lt;gateway_ip&gt; example.com</code>
           </div>
         </details>
       </div>

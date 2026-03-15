@@ -29,13 +29,11 @@
 //! ## Usage
 //!
 //! ```bash
-//! # Foreground
-//! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 \
-//!     --dns-listen 0.0.0.0:5353
+//! # Foreground with DNS on interface en0 (port 53)
+//! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 --dns
 //!
 //! # Daemon mode
-//! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 \
-//!     --dns-listen 0.0.0.0:5353 -d
+//! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 --dns -d
 //! ```
 
 mod config;
@@ -91,6 +89,8 @@ fn main() -> Result<()> {
             .init();
     }
 
+    info!("Log level: {}", config.log_level);
+
     if config.daemon {
         info!("Daemonized, PID file: {}", config.pid_file.display());
     }
@@ -103,7 +103,7 @@ fn main() -> Result<()> {
     let result = rt.block_on(async {
         let dns_table = DnsTable::new();
 
-        if let Some(dns_listen) = config.dns_listen {
+        if let Some(dns_listen) = config.resolve_dns_listen() {
             let table = dns_table.clone();
             let upstream = config.dns_upstream.clone();
             tokio::spawn(async move {

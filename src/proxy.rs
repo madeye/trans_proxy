@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::dns::DnsTable;
@@ -37,7 +37,7 @@ pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, client_addr, &pf, &config, &dns_table).await {
-                debug!("Connection from {} failed: {:#}", client_addr, e);
+                warn!("{} [failed] {:#}", client_addr, e);
             }
         });
     }
@@ -87,21 +87,20 @@ async fn handle_connection(
         Some(h) => format!("{}({}:{})", h, orig_dest.ip(), orig_dest.port()),
         None => format!("{}:{}", orig_dest.ip(), orig_dest.port()),
     };
-    debug!("Connection from {} -> {}", client_addr, dest_display);
+    info!("{} -> {} [connecting]", client_addr, dest_display);
 
     let mut outbound = connect_via_proxy(
         config.upstream_proxy,
         orig_dest,
         hostname.as_deref(),
     ).await?;
-    debug!("CONNECT tunnel established to {}", dest_display);
+    debug!("{} -> {} [tunnel established]", client_addr, dest_display);
 
     let (client_bytes, server_bytes) = copy_bidirectional(&mut inbound, &mut outbound).await?;
-    debug!(
-        "Connection {} -> {}:{} closed (client={}, server={})",
+    info!(
+        "{} -> {} [closed] tx={} rx={}",
         client_addr,
-        orig_dest.ip(),
-        orig_dest.port(),
+        dest_display,
         client_bytes,
         server_bytes
     );
