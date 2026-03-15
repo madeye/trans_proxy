@@ -18,7 +18,7 @@ Designed to run on a Mac acting as a side router (gateway) for other devices on 
 
 - **pf integration** — Uses `DIOCNATLOOK` ioctl on `/dev/pf` to recover original destinations from pf's NAT state table
 - **SNI extraction** — Peeks at TLS ClientHello to extract hostnames, sending proper `CONNECT host:port` instead of raw IPs
-- **DNS interception** — Optional local DNS forwarder that builds an IP→domain lookup table as a fallback for hostname resolution
+- **DNS interception** — Optional local DNS forwarder that builds an IP→domain lookup table as a fallback for hostname resolution (supports both traditional UDP and DNS-over-HTTPS)
 - **Anchor-based pf rules** — Won't clobber your existing firewall config
 - **Daemon mode** — Run as a background process with PID file and log file support
 - **Async I/O** — Built on tokio with per-connection task spawning
@@ -57,11 +57,10 @@ cargo test
 This example assumes your upstream HTTP proxy runs on `127.0.0.1:1082` and your LAN interface is `en0`.
 
 ```bash
-# Step 1: Start the transparent proxy with DNS interception
+# Step 1: Start the transparent proxy with DNS interception (DoH by default)
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
-  --dns-listen 0.0.0.0:5353 \
-  --dns-upstream 8.8.8.8:53
+  --dns-listen 0.0.0.0:5353
 
 # Or run as a daemon
 sudo ./target/release/trans_proxy \
@@ -91,7 +90,18 @@ The proxy requires root to open `/dev/pf` for NAT lookups:
 sudo ./target/release/trans_proxy \
   --upstream-proxy <proxy_host>:<proxy_port>
 
-# Full — with DNS interception for hostname resolution
+# Full — with DNS interception (uses Cloudflare DoH by default)
+sudo ./target/release/trans_proxy \
+  --upstream-proxy <proxy_host>:<proxy_port> \
+  --dns-listen 0.0.0.0:5353
+
+# Use a specific DoH provider
+sudo ./target/release/trans_proxy \
+  --upstream-proxy <proxy_host>:<proxy_port> \
+  --dns-listen 0.0.0.0:5353 \
+  --dns-upstream https://dns.google/dns-query
+
+# Use traditional UDP DNS instead of DoH
 sudo ./target/release/trans_proxy \
   --upstream-proxy <proxy_host>:<proxy_port> \
   --dns-listen 0.0.0.0:5353 \
@@ -126,7 +136,7 @@ sudo ./target/release/trans_proxy \
 | `--upstream-proxy` | *(required)* | Upstream HTTP CONNECT proxy address (`host:port`) |
 | `--log-level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `--dns-listen` | *(disabled)* | Enable DNS forwarder on this address (e.g., `0.0.0.0:5353`) |
-| `--dns-upstream` | `8.8.8.8:53` | Upstream DNS server for the forwarder |
+| `--dns-upstream` | `https://cloudflare-dns.com/dns-query` | Upstream DNS: `host:port` for UDP, or `https://` URL for DoH |
 | `-d` / `--daemon` | off | Run as a background daemon |
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID file path (used with `--daemon`) |
 | `--log-file` | `/var/log/trans_proxy.log` (daemon) / stderr | Log file path |

@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>trans_proxy — Transparent Proxy for macOS</title>
-  <meta name="description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS interception, and daemon mode.">
+  <meta name="description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta name="author" content="Max Lv">
 
   <!-- Open Graph / Facebook -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://madeye.github.io/trans_proxy/">
   <meta property="og:title" content="trans_proxy — Transparent Proxy for macOS">
-  <meta property="og:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS interception, and daemon mode.">
+  <meta property="og:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta property="og:site_name" content="trans_proxy">
 
   <meta property="og:image" content="https://madeye.github.io/trans_proxy/icon.png">
@@ -20,7 +20,7 @@
   <meta name="twitter:card" content="summary">
   <meta name="twitter:url" content="https://madeye.github.io/trans_proxy/">
   <meta name="twitter:title" content="trans_proxy — Transparent Proxy for macOS">
-  <meta name="twitter:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS interception, and daemon mode.">
+  <meta name="twitter:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta name="twitter:image" content="https://madeye.github.io/trans_proxy/icon.png">
 
   <!-- Favicon -->
@@ -832,7 +832,7 @@
         </div>
         <div class="feature">
           <h3>DNS Interception</h3>
-          <p>Optional local DNS forwarder that captures A record responses and builds an IP&rarr;domain lookup table for hostname resolution on non-TLS traffic.</p>
+          <p>Optional local DNS forwarder that captures A record responses and builds an IP&rarr;domain lookup table. Supports DNS-over-HTTPS (DoH) and traditional UDP upstream.</p>
         </div>
         <div class="feature">
           <h3>Safe pf Anchors</h3>
@@ -891,7 +891,7 @@
       <div class="steps">
         <div class="step">
           <h3>Start the transparent proxy</h3>
-          <p>Run with DNS interception enabled for full hostname resolution:</p>
+          <p>Run with DNS interception enabled (uses Cloudflare DoH by default):</p>
 <pre class="code"><span class="comment"># Foreground</span>
 <span class="cmd">sudo ./target/release/trans_proxy</span> \
   <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
@@ -964,8 +964,8 @@
           </tr>
           <tr>
             <td><code>--dns-upstream</code></td>
-            <td>8.8.8.8:53</td>
-            <td>Upstream DNS server for the forwarder</td>
+            <td>https://cloudflare-dns.com/dns-query</td>
+            <td>Upstream DNS: <code>host:port</code> for UDP, or <code>https://</code> URL for DoH</td>
           </tr>
           <tr>
             <td><code>-d</code> / <code>--daemon</code></td>
@@ -1019,7 +1019,7 @@
         </div>
         <div class="feature">
           <h3>2. DNS Table</h3>
-          <p>IP&rarr;domain mapping from intercepted DNS A records. Works for HTTP and HTTPS. Requires <code>--dns-listen</code>.</p>
+          <p>IP&rarr;domain mapping from intercepted DNS responses (via DoH or UDP). Works for HTTP and HTTPS. Requires <code>--dns-listen</code>.</p>
         </div>
         <div class="feature">
           <h3>3. Raw IP</h3>

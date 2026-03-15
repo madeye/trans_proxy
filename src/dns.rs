@@ -1,8 +1,8 @@
 //! Local DNS forwarder with IP→domain mapping capture.
 //!
 //! Listens on a UDP port, forwards all DNS queries to a configured upstream
-//! server, and parses A records from responses to build an IP→domain lookup
-//! table shared with the proxy.
+//! server (via UDP or DNS-over-HTTPS), and parses A records from responses
+//! to build an IP→domain lookup table shared with the proxy.
 //!
 //! # Purpose
 //!
@@ -15,6 +15,13 @@
 //! - Plain HTTP (port 80) where there is no TLS SNI to extract
 //! - TLS clients that don't send SNI (rare but possible)
 //! - Upstream proxies that require hostnames for routing or access control
+//!
+//! # Upstream modes
+//!
+//! - **DoH** (default: `https://cloudflare-dns.com/dns-query`): DNS-over-HTTPS
+//!   (RFC 8484), sends the raw DNS wire format via HTTP POST with
+//!   `application/dns-message`
+//! - **UDP** (e.g., `8.8.8.8:53`): Traditional DNS over UDP
 //!
 //! # Cache
 //!
@@ -29,6 +36,8 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
+
+use crate::config::DnsUpstream;
 
 const MAX_DNS_PACKET: usize = 1500;
 const MAX_CACHE_ENTRIES: usize = 10_000;
@@ -71,25 +80,28 @@ impl DnsTable {
     }
 }
 
-/// Run the DNS forwarder.
-///
-/// Binds to `listen_addr`, forwards all queries to `upstream_dns`,
-/// and records A record responses in the shared `table`.
-pub async fn run(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTable) -> Result<()> {
+/// Run the DNS forwarder, dispatching to UDP or DoH based on upstream config.
+pub async fn run(listen_addr: SocketAddr, upstream: DnsUpstream, table: DnsTable) -> Result<()> {
+    match upstream {
+        DnsUpstream::Udp(addr) => run_udp(listen_addr, addr, table).await,
+        DnsUpstream::Https(url) => run_doh(listen_addr, url, table).await,
+    }
+}
+
+/// Run the DNS forwarder with a traditional UDP upstream.
+async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTable) -> Result<()> {
     let socket = UdpSocket::bind(listen_addr)
         .await
         .context("Failed to bind DNS listener")?;
-    info!("DNS forwarder listening on {}, upstream {}", listen_addr, upstream_dns);
+    info!("DNS forwarder listening on {}, upstream UDP {}", listen_addr, upstream_dns);
 
-    // We use a single upstream socket for forwarding.
-    // Map transaction IDs to client addresses for routing replies back.
     let upstream_socket = UdpSocket::bind("0.0.0.0:0")
         .await
         .context("Failed to bind upstream DNS socket")?;
     upstream_socket.connect(upstream_dns).await?;
 
-    // Track pending queries: transaction_id → (client_addr, query_name)
-    let pending: Arc<RwLock<HashMap<u16, (SocketAddr, String)>>> =
+    // Track pending queries: (transaction_id, client_addr) → query_name
+    let pending: Arc<RwLock<HashMap<(u16, SocketAddr), String>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
     let socket = Arc::new(socket);
@@ -120,17 +132,30 @@ pub async fn run(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
             }
             let tx_id = u16::from_be_bytes([packet[0], packet[1]]);
 
-            // Look up the original client
-            let (client_addr, query_name) = {
+            // Look up the original client(s) for this transaction ID
+            let clients: Vec<(SocketAddr, String)> = {
                 let mut map = match resp_pending.write() {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                match map.remove(&tx_id) {
-                    Some(v) => v,
-                    None => continue,
-                }
+                // Collect all entries matching this tx_id (multiple clients may share the same ID)
+                let matching_keys: Vec<(u16, SocketAddr)> = map
+                    .keys()
+                    .filter(|(id, _)| *id == tx_id)
+                    .copied()
+                    .collect();
+                matching_keys
+                    .into_iter()
+                    .filter_map(|key| map.remove(&key).map(|name| (key.1, name)))
+                    .collect()
             };
+
+            if clients.is_empty() {
+                continue;
+            }
+
+            // Use the query name from the first client (they all queried the same name for this tx_id response)
+            let query_name = &clients[0].1;
 
             // Parse A records from the response and populate the table
             if let Some(ips) = parse_a_records(packet) {
@@ -140,9 +165,11 @@ pub async fn run(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
                 }
             }
 
-            // Forward response back to the original client
-            if let Err(e) = resp_socket.send_to(packet, client_addr).await {
-                debug!("DNS: failed to send response to {}: {}", client_addr, e);
+            // Forward response back to all matching clients
+            for (client_addr, _) in &clients {
+                if let Err(e) = resp_socket.send_to(packet, client_addr).await {
+                    debug!("DNS: failed to send response to {}: {}", client_addr, e);
+                }
             }
         }
     });
@@ -162,9 +189,9 @@ pub async fn run(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
         // Extract the query name for later use
         let query_name = parse_query_name(packet).unwrap_or_default();
 
-        // Store pending query
+        // Store pending query keyed by (tx_id, client_addr) to avoid collisions
         if let Ok(mut map) = pending.write() {
-            map.insert(tx_id, (client_addr, query_name));
+            map.insert((tx_id, client_addr), query_name);
         }
 
         // Forward to upstream
@@ -172,6 +199,81 @@ pub async fn run(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
             debug!("DNS: failed to forward query to upstream: {}", e);
         }
     }
+}
+
+/// Run the DNS forwarder with a DNS-over-HTTPS upstream (RFC 8484).
+///
+/// Each client query is forwarded as an HTTP POST with `application/dns-message`
+/// content type. The raw DNS wire-format response is sent back to the client.
+async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> Result<()> {
+    let socket = Arc::new(
+        UdpSocket::bind(listen_addr)
+            .await
+            .context("Failed to bind DNS listener")?,
+    );
+    info!("DNS forwarder listening on {}, upstream DoH {}", listen_addr, doh_url);
+
+    let client = reqwest::Client::builder()
+        .build()
+        .context("Failed to build HTTP client for DoH")?;
+
+    let mut buf = vec![0u8; MAX_DNS_PACKET];
+    loop {
+        let (n, client_addr) = socket.recv_from(&mut buf).await?;
+        let packet = buf[..n].to_vec();
+
+        if packet.len() < 12 {
+            continue;
+        }
+
+        let query_name = parse_query_name(&packet).unwrap_or_default();
+
+        let socket = Arc::clone(&socket);
+        let client = client.clone();
+        let doh_url = doh_url.clone();
+        let table = table.clone();
+
+        tokio::spawn(async move {
+            match doh_query(&client, &doh_url, &packet).await {
+                Ok(response) => {
+                    // Parse A records and populate the table
+                    if let Some(ips) = parse_a_records(&response) {
+                        for ip in &ips {
+                            debug!("DNS (DoH): {} -> {}", ip, query_name);
+                            table.insert(*ip, query_name.clone());
+                        }
+                    }
+
+                    // Send response back to client
+                    if let Err(e) = socket.send_to(&response, client_addr).await {
+                        debug!("DNS: failed to send DoH response to {}: {}", client_addr, e);
+                    }
+                }
+                Err(e) => {
+                    debug!("DoH query for {} failed: {:#}", query_name, e);
+                }
+            }
+        });
+    }
+}
+
+/// Send a DNS wire-format query to a DoH server and return the wire-format response.
+async fn doh_query(client: &reqwest::Client, url: &str, query: &[u8]) -> Result<Vec<u8>> {
+    let response = client
+        .post(url)
+        .header("Content-Type", "application/dns-message")
+        .header("Accept", "application/dns-message")
+        .body(query.to_vec())
+        .send()
+        .await
+        .context("DoH request failed")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("DoH server returned status {}", response.status());
+    }
+
+    let bytes = response.bytes().await.context("Failed to read DoH response body")?;
+    Ok(bytes.to_vec())
 }
 
 /// Parse the query name (QNAME) from a DNS packet.

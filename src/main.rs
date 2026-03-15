@@ -22,7 +22,7 @@
 //! - [`daemon`] — Unix double-fork daemonization with PID file management
 //! - [`orig_dest`] — Original destination recovery using `DIOCNATLOOK` ioctl
 //! - [`sni`] — TLS ClientHello SNI extraction
-//! - [`dns`] — Local DNS forwarder with IP→domain mapping
+//! - [`dns`] — Local DNS forwarder with IP→domain mapping (UDP and DoH)
 //! - [`tunnel`] — HTTP CONNECT tunnel establishment
 //! - [`proxy`] — TCP accept loop and per-connection handler
 //!
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
 
         if let Some(dns_listen) = config.dns_listen {
             let table = dns_table.clone();
-            let upstream = config.dns_upstream;
+            let upstream = config.dns_upstream.clone();
             tokio::spawn(async move {
                 if let Err(e) = dns::run(dns_listen, upstream, table).await {
                     tracing::error!("DNS forwarder failed: {:#}", e);
