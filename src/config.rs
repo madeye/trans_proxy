@@ -39,11 +39,7 @@ impl std::str::FromStr for DnsUpstream {
 }
 
 fn default_log_level() -> String {
-    if cfg!(debug_assertions) {
-        "debug".to_string()
-    } else {
-        "info".to_string()
-    }
+    "info".to_string()
 }
 
 #[derive(Parser, Debug, Clone)]
