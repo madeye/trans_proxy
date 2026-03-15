@@ -1,8 +1,9 @@
 //! Local DNS forwarder with IP→domain mapping capture.
 //!
-//! Listens on a UDP port, forwards all DNS queries to a configured upstream
-//! server (via UDP or DNS-over-HTTPS), and parses A records from responses
-//! to build an IP→domain lookup table shared with the proxy.
+//! Listens directly on the gateway interface (port 53) for DNS queries from
+//! LAN clients, forwards them to a configured upstream server (via UDP or
+//! DNS-over-HTTPS), and parses A records from responses to build an IP→domain
+//! lookup table shared with the proxy.
 //!
 //! # Purpose
 //!

@@ -22,7 +22,7 @@
 //! - [`daemon`] — Unix double-fork daemonization with PID file management
 //! - [`orig_dest`] — Original destination recovery using `DIOCNATLOOK` ioctl
 //! - [`sni`] — TLS ClientHello SNI extraction
-//! - [`dns`] — Local DNS forwarder with IP→domain mapping (UDP and DoH)
+//! - [`dns`] — DNS forwarder on gateway interface port 53 (UDP and DoH upstream)
 //! - [`tunnel`] — HTTP CONNECT tunnel establishment
 //! - [`proxy`] — TCP accept loop and per-connection handler
 //!
