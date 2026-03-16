@@ -1,17 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>trans_proxy — Transparent Proxy for macOS</title>
-  <meta name="description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <title>trans_proxy — macOS 透明代理</title>
+  <meta name="description" content="一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta name="author" content="Max Lv">
 
   <!-- Open Graph / Facebook -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://madeye.github.io/trans_proxy/">
-  <meta property="og:title" content="trans_proxy — Transparent Proxy for macOS">
-  <meta property="og:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <meta property="og:title" content="trans_proxy — macOS 透明代理">
+  <meta property="og:description" content="一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta property="og:site_name" content="trans_proxy">
 
   <meta property="og:image" content="https://madeye.github.io/trans_proxy/icon.png">
@@ -19,8 +19,8 @@
   <!-- Twitter / X -->
   <meta name="twitter:card" content="summary">
   <meta name="twitter:url" content="https://madeye.github.io/trans_proxy/">
-  <meta name="twitter:title" content="trans_proxy — Transparent Proxy for macOS">
-  <meta name="twitter:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <meta name="twitter:title" content="trans_proxy — macOS 透明代理">
+  <meta name="twitter:description" content="一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta name="twitter:image" content="https://madeye.github.io/trans_proxy/icon.png">
 
   <!-- Favicon -->
@@ -399,13 +399,13 @@
     <div class="container">
       <h1><code>trans_proxy</code></h1>
       <p class="tagline">
-        A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy.
+        一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。
       </p>
       <div class="hero-buttons">
-        <a href="https://github.com/madeye/trans_proxy/releases/latest" class="btn btn-primary">Download</a>
+        <a href="https://github.com/madeye/trans_proxy/releases/latest" class="btn btn-primary">下载</a>
         <a href="https://github.com/madeye/trans_proxy" class="btn btn-secondary">GitHub</a>
-        <a href="#quick-start" class="btn btn-secondary">Quick Start</a>
-        <a href="index_zh.html" class="btn btn-secondary">中文</a>
+        <a href="#quick-start" class="btn btn-secondary">快速开始</a>
+        <a href="index.html" class="btn btn-secondary">English</a>
       </div>
 
       <div class="diagram" style="padding: 32px 16px;">
@@ -444,7 +444,7 @@
             <rect x="58" y="32" width="16" height="28" rx="2" fill="none" stroke="#3fb950" stroke-width="1.5"/>
             <rect x="84" y="38" width="24" height="18" rx="2" fill="none" stroke="#3fb950" stroke-width="1.5"/>
             <line x1="90" y1="56" x2="102" y2="56" stroke="#3fb950" stroke-width="1.5"/>
-            <text x="60" y="88" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Client Devices</text>
+            <text x="60" y="88" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">客户端设备</text>
           </g>
 
           <!-- macOS pf rdr -->
@@ -464,7 +464,7 @@
 
           <!-- Inner workings box -->
           <rect x="460" y="110" width="350" height="180" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1" stroke-dasharray="4,3"/>
-          <text x="635" y="134" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11" font-style="italic">inside trans_proxy</text>
+          <text x="635" y="134" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11" font-style="italic">trans_proxy 内部</text>
 
           <!-- DIOCNATLOOK -->
           <g>
@@ -475,13 +475,13 @@
           <!-- SNI Extract -->
           <g>
             <rect id="node-sni" x="645" y="148" width="145" height="36" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-            <text x="717" y="171" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">SNI Extract</text>
+            <text x="717" y="171" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">SNI 提取</text>
           </g>
 
           <!-- DNS Table -->
           <g>
             <rect id="node-dns" x="480" y="200" width="145" height="36" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-            <text x="552" y="223" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">DNS Table</text>
+            <text x="552" y="223" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="11">DNS 表</text>
           </g>
 
           <!-- CONNECT -->
@@ -494,26 +494,26 @@
           <!-- Upstream Proxy -->
           <g>
             <rect x="500" y="332" width="270" height="46" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-            <text x="635" y="360" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Upstream HTTP CONNECT Proxy</text>
+            <text x="635" y="360" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">上游 HTTP CONNECT 代理</text>
           </g>
 
           <!-- Original Destination -->
           <g>
             <rect x="535" y="402" width="200" height="36" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-            <text x="635" y="425" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Original Destination</text>
+            <text x="635" y="425" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">原始目标地址</text>
           </g>
 
           <!-- DNS Forwarder (side) -->
           <g>
             <rect x="30" y="180" width="170" height="46" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-            <text x="115" y="203" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="12">DNS Forwarder</text>
+            <text x="115" y="203" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="12">DNS 转发器</text>
             <text x="115" y="218" text-anchor="middle" fill="#8b949e" font-family="'SF Mono', monospace" font-size="10">:53</text>
           </g>
 
           <!-- ============ STATIC LINES & LABELS ============ -->
 
           <line x1="125" y1="52" x2="248" y2="52" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6,4"/>
-          <text x="186" y="42" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11">gateway</text>
+          <text x="186" y="42" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11">网关</text>
 
           <line x1="420" y1="52" x2="508" y2="52" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
           <text x="464" y="42" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="11">rdr</text>
@@ -526,7 +526,7 @@
           <line x1="635" y1="378" x2="635" y2="400" stroke="#3fb950" stroke-width="2" marker-end="url(#arrow-green)"/>
 
           <line x1="200" y1="210" x2="478" y2="216" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrow-dim)" stroke-dasharray="4,3"/>
-          <text x="340" y="206" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="10">IP &rarr; domain</text>
+          <text x="340" y="206" text-anchor="middle" fill="#8b949e" font-family="-apple-system, sans-serif" font-size="10">IP &rarr; 域名</text>
 
           <line x1="335" y1="76" x2="335" y2="152" stroke="#30363d" stroke-width="1" stroke-dasharray="4,3"/>
           <line x1="335" y1="152" x2="478" y2="164" stroke="#30363d" stroke-width="1" stroke-dasharray="4,3"/>
@@ -821,35 +821,35 @@
   <!-- Features -->
   <section>
     <div class="container">
-      <h2>Features</h2>
+      <h2>功能特性</h2>
       <div class="features">
         <div class="feature">
-          <h3>pf Integration</h3>
-          <p>Uses <code>DIOCNATLOOK</code> ioctl on <code>/dev/pf</code> to recover original destinations from pf's NAT state table &mdash; the same technique mitmproxy uses.</p>
+          <h3>pf 集成</h3>
+          <p>使用 <code>/dev/pf</code> 上的 <code>DIOCNATLOOK</code> ioctl 从 pf 的 NAT 状态表中恢复原始目标地址 &mdash; 与 mitmproxy 使用的技术相同。</p>
         </div>
         <div class="feature">
-          <h3>SNI Extraction</h3>
-          <p>Peeks at the TLS ClientHello to extract hostnames, sending proper <code>CONNECT host:port</code> instead of raw IPs. No TLS termination or certificate generation needed.</p>
+          <h3>SNI 提取</h3>
+          <p>窥探 TLS ClientHello 以提取主机名，发送正确的 <code>CONNECT host:port</code> 而非原始 IP。无需 TLS 终止或证书生成。</p>
         </div>
         <div class="feature">
-          <h3>DNS Forwarder</h3>
-          <p>Listens directly on the gateway interface (port 53) for LAN client DNS queries. Builds an IP&rarr;domain lookup table. Supports DoH and UDP upstream.</p>
+          <h3>DNS 转发器</h3>
+          <p>直接在网关接口（端口 53）上监听局域网客户端的 DNS 查询。构建 IP&rarr;域名查找表。支持 DoH 和 UDP 上游。</p>
         </div>
         <div class="feature">
-          <h3>Safe pf Anchors</h3>
-          <p>Uses anchor-based pf rules so your existing firewall configuration is never touched or overwritten.</p>
+          <h3>安全的 pf 锚点</h3>
+          <p>使用基于锚点的 pf 规则，因此不会触碰或覆盖您现有的防火墙配置。</p>
         </div>
         <div class="feature">
-          <h3>Daemon Mode</h3>
-          <p>Run as a background process with PID file and log file support. Start with <code>-d</code>, stop with <code>kill</code>.</p>
+          <h3>守护进程模式</h3>
+          <p>支持作为后台进程运行，带有 PID 文件和日志文件支持。使用 <code>-d</code> 启动，使用 <code>kill</code> 停止。</p>
         </div>
         <div class="feature">
-          <h3>launchd Service</h3>
-          <p>Install as a macOS LaunchDaemon for automatic startup on boot and crash recovery. Use <code>--install</code> and <code>--uninstall</code>.</p>
+          <h3>launchd 服务</h3>
+          <p>安装为 macOS LaunchDaemon，开机自动启动并支持崩溃自动恢复。使用 <code>--install</code> 和 <code>--uninstall</code>。</p>
         </div>
         <div class="feature">
-          <h3>Async I/O</h3>
-          <p>Built on tokio with per-connection task spawning. Handles many concurrent connections efficiently with bidirectional relay.</p>
+          <h3>异步 I/O</h3>
+          <p>基于 tokio 构建，为每个连接生成独立任务。通过双向中继高效处理大量并发连接。</p>
         </div>
       </div>
     </div>
@@ -858,12 +858,12 @@
   <!-- Requirements -->
   <section>
     <div class="container">
-      <h2>Requirements</h2>
+      <h2>系统要求</h2>
       <ul style="color: var(--text-muted); padding-left: 20px; font-size: 0.95rem; line-height: 2;">
-        <li>macOS 12+ (uses pf and <code>DIOCNATLOOK</code> ioctl)</li>
-        <li>Rust 1.70+ and Cargo</li>
-        <li>Root privileges (for <code>/dev/pf</code> access and pf rule management)</li>
-        <li>An upstream HTTP CONNECT proxy (e.g., Squid, privoxy, or any CONNECT-capable proxy)</li>
+        <li>macOS 12+（使用 pf 和 <code>DIOCNATLOOK</code> ioctl）</li>
+        <li>Rust 1.70+ 和 Cargo</li>
+        <li>Root 权限（用于访问 <code>/dev/pf</code> 和管理 pf 规则）</li>
+        <li>一个上游 HTTP CONNECT 代理（例如 Squid、privoxy 或任何支持 CONNECT 的代理）</li>
       </ul>
     </div>
   </section>
@@ -871,15 +871,15 @@
   <!-- Build -->
   <section>
     <div class="container">
-      <h2>Build</h2>
-<pre class="code"><span class="comment"># Clone the repository</span>
+      <h2>构建</h2>
+<pre class="code"><span class="comment"># 克隆仓库</span>
 <span class="cmd">git clone</span> <span class="value">https://github.com/madeye/trans_proxy.git</span>
 <span class="cmd">cd</span> <span class="value">trans_proxy</span>
 
-<span class="comment"># Build release binary</span>
+<span class="comment"># 构建发布版二进制文件</span>
 <span class="cmd">cargo build</span> <span class="flag">--release</span>
 
-<span class="comment"># Verify</span>
+<span class="comment"># 验证</span>
 <span class="cmd">cargo test</span>
 <span class="cmd">./target/release/trans_proxy</span> <span class="flag">--help</span></pre>
     </div>
@@ -888,42 +888,42 @@
   <!-- Quick Start -->
   <section id="quick-start">
     <div class="container">
-      <h2>Quick Start</h2>
+      <h2>快速开始</h2>
       <p style="color: var(--text-muted); margin-bottom: 24px;">
-        This example assumes your upstream HTTP proxy runs on <code>127.0.0.1:1082</code> and your LAN interface is <code>en0</code>.
+        本示例假设您的上游 HTTP 代理运行在 <code>127.0.0.1:1082</code>，局域网接口为 <code>en0</code>。
       </p>
 
       <div class="steps">
         <div class="step">
-          <h3>Start the transparent proxy</h3>
-          <p>Run with DNS on the gateway interface (uses Cloudflare DoH by default):</p>
-<pre class="code"><span class="comment"># Foreground (auto-detects en0 IP, listens on port 53)</span>
+          <h3>启动透明代理</h3>
+          <p>在网关接口上启用 DNS 运行（默认使用 Cloudflare DoH）：</p>
+<pre class="code"><span class="comment"># 前台运行（自动检测 en0 IP，监听端口 53）</span>
 <span class="cmd">sudo ./target/release/trans_proxy</span> \
   <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
   <span class="flag">--dns</span>
 
-<span class="comment"># Or as a daemon</span>
+<span class="comment"># 或作为守护进程运行</span>
 <span class="cmd">sudo ./target/release/trans_proxy</span> \
   <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
   <span class="flag">--dns</span> <span class="flag">-d</span></pre>
         </div>
 
         <div class="step">
-          <h3>Set up pf redirection</h3>
-          <p>In another terminal, install the pf rules (HTTP/HTTPS only &mdash; DNS is handled directly):</p>
+          <h3>设置 pf 重定向</h3>
+          <p>在另一个终端中安装 pf 规则（仅 HTTP/HTTPS &mdash; DNS 由程序直接处理）：</p>
 <pre class="code"><span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span></pre>
-          <p>The script prints your gateway IP and setup summary.</p>
+          <p>脚本会输出您的网关 IP 和设置摘要。</p>
         </div>
 
         <div class="step">
-          <h3>Configure client devices</h3>
-          <p>Set the Mac's IP as the default gateway (and DNS server) on each client device.</p>
+          <h3>配置客户端设备</h3>
+          <p>在每个客户端设备上将 Mac 的 IP 设置为默认网关（和 DNS 服务器）。</p>
         </div>
 
         <div class="step">
-          <h3>Tear down when done</h3>
+          <h3>完成后清理</h3>
 <pre class="code"><span class="cmd">sudo scripts/pf_teardown.sh</span>
-<span class="comment"># If running as daemon</span>
+<span class="comment"># 如果以守护进程运行</span>
 <span class="cmd">sudo kill</span> <span class="value">$(cat /var/run/trans_proxy.pid)</span></pre>
         </div>
       </div>
@@ -933,85 +933,85 @@
   <!-- CLI Reference -->
   <section>
     <div class="container">
-      <h2>CLI Reference</h2>
+      <h2>命令行参数</h2>
       <table>
         <thead>
           <tr>
-            <th>Flag</th>
-            <th>Default</th>
-            <th>Description</th>
+            <th>参数</th>
+            <th>默认值</th>
+            <th>说明</th>
           </tr>
         </thead>
         <tbody>
           <tr>
             <td><code>--listen-addr</code></td>
             <td>0.0.0.0:8443</td>
-            <td>Address and port the proxy listens on</td>
+            <td>代理监听的地址和端口</td>
           </tr>
           <tr>
             <td><code>--upstream-proxy</code></td>
-            <td><em>required</em></td>
-            <td>Upstream HTTP CONNECT proxy address</td>
+            <td><em>必填</em></td>
+            <td>上游 HTTP CONNECT 代理地址</td>
           </tr>
           <tr>
             <td><code>--log-level</code></td>
             <td>info</td>
-            <td>Log verbosity: trace, debug, info, warn, error</td>
+            <td>日志详细级别：trace、debug、info、warn、error</td>
           </tr>
           <tr>
             <td><code>--dns</code></td>
             <td>off</td>
-            <td>Enable DNS forwarder on the gateway interface (port 53)</td>
+            <td>在网关接口上启用 DNS 转发器（端口 53）</td>
           </tr>
           <tr>
             <td><code>--interface</code></td>
             <td>en0</td>
-            <td>Network interface for DNS auto-detection</td>
+            <td>用于 DNS 自动检测的网络接口</td>
           </tr>
           <tr>
             <td><code>--dns-listen</code></td>
-            <td><em>auto</em></td>
-            <td>Override DNS listen address (e.g., <code>192.168.1.42:53</code>)</td>
+            <td><em>自动</em></td>
+            <td>覆盖 DNS 监听地址（例如 <code>192.168.1.42:53</code>）</td>
           </tr>
           <tr>
             <td><code>--dns-upstream</code></td>
             <td>https://cloudflare-dns.com/dns-query</td>
-            <td>Upstream DNS: <code>host:port</code> for UDP, or <code>https://</code> URL for DoH</td>
+            <td>上游 DNS：UDP 使用 <code>host:port</code>，DoH 使用 <code>https://</code> URL</td>
           </tr>
           <tr>
             <td><code>-d</code> / <code>--daemon</code></td>
             <td>off</td>
-            <td>Run as a background daemon</td>
+            <td>作为后台守护进程运行</td>
           </tr>
           <tr>
             <td><code>--pid-file</code></td>
             <td>/var/run/trans_proxy.pid</td>
-            <td>PID file path (used with <code>--daemon</code>)</td>
+            <td>PID 文件路径（与 <code>--daemon</code> 一起使用）</td>
           </tr>
           <tr>
             <td><code>--log-file</code></td>
-            <td>/var/log/trans_proxy.log (daemon)</td>
-            <td>Log file path (defaults to stderr in foreground)</td>
+            <td>/var/log/trans_proxy.log（守护进程）</td>
+            <td>日志文件路径（前台运行时默认输出到 stderr）</td>
           </tr>
           <tr>
             <td><code>--install</code></td>
             <td>off</td>
-            <td>Install as a macOS launchd service (LaunchDaemon)</td>
+            <td>安装为 macOS launchd 服务（LaunchDaemon）</td>
           </tr>
           <tr>
             <td><code>--uninstall</code></td>
             <td>off</td>
-            <td>Uninstall the macOS launchd service</td>
+            <td>卸载 macOS launchd 服务</td>
           </tr>
         </tbody>
       </table>
 
-      <h3 style="margin-top: 32px;">pf Scripts</h3>
-<pre class="code"><span class="comment"># Setup: pf_setup.sh &lt;interface&gt; [proxy_port]</span>
-<span class="comment"># DNS no longer needs pf redirection &mdash; listens on port 53 directly</span>
+      <h3 style="margin-top: 32px;">pf 脚本</h3>
+<pre class="code"><span class="comment"># 设置：pf_setup.sh &lt;interface&gt; [proxy_port]</span>
+<span class="comment"># DNS 不再需要 pf 重定向 &mdash; 直接监听端口 53</span>
 <span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span>
 
-<span class="comment"># Teardown: flushes anchor rules, disables IP forwarding</span>
+<span class="comment"># 清理：刷新锚点规则，禁用 IP 转发</span>
 <span class="cmd">sudo scripts/pf_teardown.sh</span></pre>
     </div>
   </section>
@@ -1019,42 +1019,42 @@
   <!-- How It Works -->
   <section>
     <div class="container">
-      <h2>How It Works</h2>
+      <h2>工作原理</h2>
 
-      <h3 style="margin-bottom: 16px;">Traffic Flow</h3>
+      <h3 style="margin-bottom: 16px;">流量流程</h3>
       <ol class="flow-list">
-        <li><strong>Client</strong> sends a packet to <code>example.com:443</code> (resolved to <code>93.184.216.34</code>)</li>
-        <li><strong>Packet arrives</strong> on the Mac's LAN interface (the Mac is the gateway)</li>
-        <li><strong>pf rdr rule</strong> rewrites the destination to <code>127.0.0.1:8443</code></li>
-        <li><strong>trans_proxy</strong> accepts the connection</li>
-        <li><strong>DIOCNATLOOK</strong> ioctl recovers the original destination (<code>93.184.216.34:443</code>) from pf's NAT state table</li>
-        <li><strong>SNI extraction</strong> peeks at the TLS ClientHello to read the hostname (<code>example.com</code>)</li>
-        <li>Sends <strong><code>CONNECT example.com:443</code></strong> to the upstream proxy</li>
-        <li><strong>Bidirectional relay</strong> between client and upstream proxy</li>
+        <li><strong>客户端</strong>发送数据包到 <code>example.com:443</code>（解析为 <code>93.184.216.34</code>）</li>
+        <li><strong>数据包到达</strong> Mac 的局域网接口（Mac 作为网关）</li>
+        <li><strong>pf rdr 规则</strong>将目标地址重写为 <code>127.0.0.1:8443</code></li>
+        <li><strong>trans_proxy</strong> 接受连接</li>
+        <li><strong>DIOCNATLOOK</strong> ioctl 从 pf 的 NAT 状态表中恢复原始目标地址（<code>93.184.216.34:443</code>）</li>
+        <li><strong>SNI 提取</strong>窥探 TLS ClientHello 以读取主机名（<code>example.com</code>）</li>
+        <li>向上游代理发送 <strong><code>CONNECT example.com:443</code></strong></li>
+        <li>在客户端和上游代理之间进行<strong>双向中继</strong></li>
       </ol>
 
-      <h3 style="margin-top: 32px; margin-bottom: 16px;">Hostname Resolution Chain</h3>
+      <h3 style="margin-top: 32px; margin-bottom: 16px;">主机名解析链</h3>
       <div class="features" style="grid-template-columns: repeat(3, 1fr);">
         <div class="feature">
           <h3>1. SNI</h3>
-          <p>Extracted from TLS ClientHello. Works for HTTPS (port 443). No TLS termination needed.</p>
+          <p>从 TLS ClientHello 中提取。适用于 HTTPS（端口 443）。无需 TLS 终止。</p>
         </div>
         <div class="feature">
-          <h3>2. DNS Table</h3>
-          <p>IP&rarr;domain mapping from DNS responses (via DoH or UDP). Works for HTTP and HTTPS. Requires <code>--dns</code>.</p>
+          <h3>2. DNS 表</h3>
+          <p>来自 DNS 响应（通过 DoH 或 UDP）的 IP&rarr;域名映射。适用于 HTTP 和 HTTPS。需要 <code>--dns</code>。</p>
         </div>
         <div class="feature">
-          <h3>3. Raw IP</h3>
-          <p>Falls back to the IP address if no hostname can be determined. Always available.</p>
+          <h3>3. 原始 IP</h3>
+          <p>如果无法确定主机名，则回退到 IP 地址。始终可用。</p>
         </div>
       </div>
 
-      <h3 style="margin-top: 32px; margin-bottom: 12px;">Why DIOCNATLOOK?</h3>
+      <h3 style="margin-top: 32px; margin-bottom: 12px;">为什么使用 DIOCNATLOOK？</h3>
       <p style="color: var(--text-muted); font-size: 0.9rem;">
-        macOS pf's <code>rdr</code> rules rewrite the destination address <em>before</em> the socket layer sees it.
-        <code>getsockname()</code> on the accepted connection returns the proxy's own address, not the original destination.
-        The <code>DIOCNATLOOK</code> ioctl queries pf's NAT state table to recover the original destination &mdash;
-        this is the same approach used by mitmproxy.
+        macOS pf 的 <code>rdr</code> 规则在套接字层看到之前就重写了目标地址。
+        对已接受的连接调用 <code>getsockname()</code> 返回的是代理自身的地址，而非原始目标地址。
+        <code>DIOCNATLOOK</code> ioctl 查询 pf 的 NAT 状态表以恢复原始目标地址 &mdash;
+        这与 mitmproxy 使用的方法相同。
       </p>
     </div>
   </section>
@@ -1062,27 +1062,27 @@
   <!-- Client Setup -->
   <section>
     <div class="container">
-      <h2>Client Setup</h2>
+      <h2>客户端设置</h2>
       <p style="color: var(--text-muted); margin-bottom: 16px;">
-        On each device you want to route through the proxy, set the Mac's IP as the default gateway and DNS server.
+        在每个需要通过代理路由的设备上，将 Mac 的 IP 设置为默认网关和 DNS 服务器。
       </p>
 
       <div class="client-grid">
         <div class="client-card">
           <h4>macOS / iOS</h4>
-          <p>Settings &rarr; Wi-Fi &rarr; (i) &rarr; Configure IP &rarr; Manual &rarr; Router &amp; DNS: gateway IP</p>
+          <p>设置 &rarr; Wi-Fi &rarr; (i) &rarr; 配置 IP &rarr; 手动 &rarr; 路由器和 DNS：网关 IP</p>
         </div>
         <div class="client-card">
           <h4>Windows</h4>
-          <p>Settings &rarr; Network &rarr; Wi-Fi &rarr; Properties &rarr; Edit IP &rarr; Manual &rarr; Gateway &amp; DNS: gateway IP</p>
+          <p>设置 &rarr; 网络 &rarr; Wi-Fi &rarr; 属性 &rarr; 编辑 IP &rarr; 手动 &rarr; 网关和 DNS：网关 IP</p>
         </div>
         <div class="client-card">
           <h4>Linux</h4>
-          <p><code>sudo ip route replace default via &lt;ip&gt;</code> and update <code>/etc/resolv.conf</code></p>
+          <p><code>sudo ip route replace default via &lt;ip&gt;</code> 并更新 <code>/etc/resolv.conf</code></p>
         </div>
         <div class="client-card">
           <h4>Android</h4>
-          <p>Wi-Fi &rarr; Long press &rarr; Modify &rarr; Advanced &rarr; Static IP &rarr; Gateway &amp; DNS: gateway IP</p>
+          <p>Wi-Fi &rarr; 长按 &rarr; 修改 &rarr; 高级 &rarr; 静态 IP &rarr; 网关和 DNS：网关 IP</p>
         </div>
       </div>
     </div>
@@ -1091,38 +1091,38 @@
   <!-- Troubleshooting -->
   <section>
     <div class="container">
-      <h2>Troubleshooting</h2>
+      <h2>故障排除</h2>
       <div class="faq">
         <details class="faq-item">
           <summary>"Failed to open /dev/pf"</summary>
-          <div class="faq-body">Run with <code>sudo</code>. The proxy needs root to access <code>/dev/pf</code>.</div>
+          <div class="faq-body">请使用 <code>sudo</code> 运行。代理需要 root 权限才能访问 <code>/dev/pf</code>。</div>
         </details>
         <details class="faq-item">
           <summary>"No ALTQ support in kernel"</summary>
-          <div class="faq-body">This is a harmless warning from <code>pfctl</code>. macOS doesn't include ALTQ. pf redirection works fine without it.</div>
+          <div class="faq-body">这是 <code>pfctl</code> 的无害警告。macOS 不包含 ALTQ。pf 重定向在没有它的情况下也能正常工作。</div>
         </details>
         <details class="faq-item">
           <summary>"DIOCNATLOOK failed"</summary>
           <div class="faq-body">
-            Ensure pf rules are loaded: <code>sudo pfctl -a trans_proxy -s rules</code><br>
-            Ensure pf is enabled: <code>sudo pfctl -s info | head -1</code><br>
-            Check that traffic is arriving on the expected interface.
+            确保 pf 规则已加载：<code>sudo pfctl -a trans_proxy -s rules</code><br>
+            确保 pf 已启用：<code>sudo pfctl -s info | head -1</code><br>
+            检查流量是否到达预期的接口。
           </div>
         </details>
         <details class="faq-item">
-          <summary>Connections hang or timeout</summary>
+          <summary>连接挂起或超时</summary>
           <div class="faq-body">
-            Verify the upstream proxy is running and accepts CONNECT requests.<br>
-            Use <code>--log-level debug</code> for detailed per-connection logging.<br>
-            Ensure IP forwarding is enabled: <code>sysctl net.inet.ip.forwarding</code> (should be 1).
+            验证上游代理是否正在运行并接受 CONNECT 请求。<br>
+            使用 <code>--log-level debug</code> 获取详细的逐连接日志。<br>
+            确保已启用 IP 转发：<code>sysctl net.inet.ip.forwarding</code>（应为 1）。
           </div>
         </details>
         <details class="faq-item">
-          <summary>DNS not resolving on client devices</summary>
+          <summary>客户端设备无法解析 DNS</summary>
           <div class="faq-body">
-            Ensure <code>--dns</code> is set and the DNS forwarder is running.<br>
-            Check that trans_proxy logs show <code>DNS forwarder listening on &lt;ip&gt;:53</code>.<br>
-            Test directly: <code>dig @&lt;gateway_ip&gt; example.com</code>
+            确保已设置 <code>--dns</code> 且 DNS 转发器正在运行。<br>
+            检查 trans_proxy 日志是否显示 <code>DNS forwarder listening on &lt;ip&gt;:53</code>。<br>
+            直接测试：<code>dig @&lt;gateway_ip&gt; example.com</code>
           </div>
         </details>
       </div>
@@ -1133,7 +1133,7 @@
     <div class="container">
       <p>
         <a href="https://github.com/madeye/trans_proxy">GitHub</a> &middot;
-        <a href="https://github.com/madeye/trans_proxy/blob/main/LICENSE">MIT License</a> &middot;
+        <a href="https://github.com/madeye/trans_proxy/blob/main/LICENSE">MIT 许可证</a> &middot;
         &copy; 2026 Max Lv
       </p>
     </div>

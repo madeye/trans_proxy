@@ -1,5 +1,7 @@
 # trans_proxy
 
+[中文文档](README_zh.md)
+
 A transparent proxy for macOS that intercepts TCP traffic redirected by pf and forwards it through an upstream HTTP CONNECT proxy.
 
 Designed to run on a Mac acting as a side router (gateway) for other devices on the LAN.
