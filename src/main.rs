@@ -20,6 +20,7 @@
 //!
 //! - [`config`] — CLI argument parsing via clap
 //! - [`daemon`] — Unix double-fork daemonization with PID file management
+//! - [`service`] — macOS launchd service installation and removal
 //! - [`orig_dest`] — Original destination recovery using `DIOCNATLOOK` ioctl
 //! - [`sni`] — TLS ClientHello SNI extraction
 //! - [`dns`] — DNS forwarder on gateway interface port 53 (UDP and DoH upstream)
@@ -34,6 +35,9 @@
 //!
 //! # Daemon mode
 //! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 --dns -d
+//!
+//! # Install as a launchd service
+//! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 --dns --install
 //! ```
 
 mod config;
@@ -41,6 +45,7 @@ mod daemon;
 mod dns;
 mod orig_dest;
 mod proxy;
+mod service;
 mod sni;
 mod tunnel;
 
@@ -54,6 +59,16 @@ use crate::dns::DnsTable;
 
 fn main() -> Result<()> {
     let config = Config::parse();
+
+    // Handle service install/uninstall before anything else
+    if config.uninstall {
+        return service::uninstall();
+    }
+    if config.install {
+        // Collect the proxy-relevant args (skip the binary name)
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        return service::install(&args);
+    }
 
     // Daemonize before starting the async runtime
     if config.daemon {

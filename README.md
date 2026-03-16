@@ -21,6 +21,7 @@ Designed to run on a Mac acting as a side router (gateway) for other devices on 
 - **DNS forwarder** — Listens directly on the gateway interface (port 53) for LAN client DNS queries, building an IP→domain lookup table. Supports DNS-over-HTTPS (DoH) and traditional UDP upstream.
 - **Anchor-based pf rules** — Won't clobber your existing firewall config
 - **Daemon mode** — Run as a background process with PID file and log file support
+- **launchd service** — Install as a macOS LaunchDaemon for automatic startup on boot
 - **Async I/O** — Built on tokio with per-connection task spawning
 
 ## Requirements
@@ -140,6 +141,8 @@ sudo ./target/release/trans_proxy \
 | `-d` / `--daemon` | off | Run as a background daemon |
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID file path (used with `--daemon`) |
 | `--log-file` | `/var/log/trans_proxy.log` (daemon) / stderr | Log file path |
+| `--install` | off | Install as a macOS launchd service (LaunchDaemon) |
+| `--uninstall` | off | Uninstall the macOS launchd service |
 
 ### Setting up pf redirection
 
@@ -201,6 +204,41 @@ In daemon mode:
 - A PID file is written (default `/var/run/trans_proxy.pid`)
 - Logs are written to a file (default `/var/log/trans_proxy.log`) instead of stderr
 - The PID file is cleaned up on exit
+
+### Service Install (launchd)
+
+Install trans_proxy as a macOS LaunchDaemon so it starts automatically on boot and restarts if it crashes:
+
+```bash
+# Install with your desired options
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns --install
+```
+
+This will:
+- Copy the binary to `/usr/local/bin/trans_proxy`
+- Generate a launchd plist at `/Library/LaunchDaemons/com.github.madeye.trans_proxy.plist`
+- Configure `RunAtLoad` and `KeepAlive` for automatic startup and restart
+- Logs go to `/var/log/trans_proxy.log`
+- Load and start the service immediately
+
+Manage the service with `launchctl`:
+
+```bash
+sudo launchctl stop  com.github.madeye.trans_proxy
+sudo launchctl start com.github.madeye.trans_proxy
+```
+
+To uninstall:
+
+```bash
+sudo trans_proxy --uninstall
+```
+
+This unloads the service, removes the plist, and removes the installed binary.
+
+**Note:** The `--daemon`, `--pid-file`, and `--log-file` flags are not needed with `--install` — launchd manages the process lifecycle directly.
 
 ### Client Setup
 

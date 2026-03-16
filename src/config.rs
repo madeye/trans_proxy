@@ -86,6 +86,14 @@ pub struct Config {
     /// Log file path (used with --daemon, defaults to stderr in foreground)
     #[arg(long)]
     pub log_file: Option<std::path::PathBuf>,
+
+    /// Install as a macOS launchd service (LaunchDaemon)
+    #[arg(long)]
+    pub install: bool,
+
+    /// Uninstall the macOS launchd service
+    #[arg(long)]
+    pub uninstall: bool,
 }
 
 impl Config {
