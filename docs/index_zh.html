@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>trans_proxy — macOS 透明代理</title>
-  <meta name="description" content="一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
+  <title>trans_proxy — macOS 和 Linux 透明代理</title>
+  <meta name="description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta name="author" content="Max Lv">
 
   <!-- Open Graph / Facebook -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://madeye.github.io/trans_proxy/">
-  <meta property="og:title" content="trans_proxy — macOS 透明代理">
-  <meta property="og:description" content="一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
+  <meta property="og:title" content="trans_proxy — macOS 和 Linux 透明代理">
+  <meta property="og:description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta property="og:site_name" content="trans_proxy">
 
   <meta property="og:image" content="https://madeye.github.io/trans_proxy/icon.png">
@@ -19,8 +19,8 @@
   <!-- Twitter / X -->
   <meta name="twitter:card" content="summary">
   <meta name="twitter:url" content="https://madeye.github.io/trans_proxy/">
-  <meta name="twitter:title" content="trans_proxy — macOS 透明代理">
-  <meta name="twitter:description" content="一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
+  <meta name="twitter:title" content="trans_proxy — macOS 和 Linux 透明代理">
+  <meta name="twitter:description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta name="twitter:image" content="https://madeye.github.io/trans_proxy/icon.png">
 
   <!-- Favicon -->
@@ -399,7 +399,7 @@
     <div class="container">
       <h1><code>trans_proxy</code></h1>
       <p class="tagline">
-        一款 macOS 透明代理工具，通过 pf 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。
+        一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。
       </p>
       <div class="hero-buttons">
         <a href="https://github.com/madeye/trans_proxy/releases/latest" class="btn btn-primary">下载</a>
@@ -824,8 +824,12 @@
       <h2>功能特性</h2>
       <div class="features">
         <div class="feature">
-          <h3>pf 集成</h3>
+          <h3>macOS pf 集成</h3>
           <p>使用 <code>/dev/pf</code> 上的 <code>DIOCNATLOOK</code> ioctl 从 pf 的 NAT 状态表中恢复原始目标地址 &mdash; 与 mitmproxy 使用的技术相同。</p>
+        </div>
+        <div class="feature">
+          <h3>Linux nftables 集成</h3>
+          <p>使用 <code>SO_ORIGINAL_DST</code> getsockopt 从 nftables 重定向规则中恢复原始目标地址。</p>
         </div>
         <div class="feature">
           <h3>SNI 提取</h3>
@@ -836,16 +840,16 @@
           <p>直接在网关接口（端口 53）上监听局域网客户端的 DNS 查询。构建 IP&rarr;域名查找表。支持 DoH 和 UDP 上游。</p>
         </div>
         <div class="feature">
-          <h3>安全的 pf 锚点</h3>
-          <p>使用基于锚点的 pf 规则，因此不会触碰或覆盖您现有的防火墙配置。</p>
+          <h3>安全的防火墙规则</h3>
+          <p>使用基于锚点的 pf 规则（macOS）或独立的 nftables 表（Linux），不会触碰现有防火墙配置。</p>
         </div>
         <div class="feature">
           <h3>守护进程模式</h3>
           <p>支持作为后台进程运行，带有 PID 文件和日志文件支持。使用 <code>-d</code> 启动，使用 <code>kill</code> 停止。</p>
         </div>
         <div class="feature">
-          <h3>launchd 服务</h3>
-          <p>安装为 macOS LaunchDaemon，开机自动启动并支持崩溃自动恢复。使用 <code>--install</code> 和 <code>--uninstall</code>。</p>
+          <h3>系统服务</h3>
+          <p>安装为系统服务（macOS 使用 launchd，Linux 使用 systemd），开机自动启动。使用 <code>--install</code> 和 <code>--uninstall</code>。</p>
         </div>
         <div class="feature">
           <h3>异步 I/O</h3>
@@ -860,9 +864,10 @@
     <div class="container">
       <h2>系统要求</h2>
       <ul style="color: var(--text-muted); padding-left: 20px; font-size: 0.95rem; line-height: 2;">
-        <li>macOS 12+（使用 pf 和 <code>DIOCNATLOOK</code> ioctl）</li>
-        <li>Rust 1.70+ 和 Cargo</li>
-        <li>Root 权限（用于访问 <code>/dev/pf</code> 和管理 pf 规则）</li>
+        <li><strong>macOS</strong>：macOS 12+（使用 pf 和 <code>DIOCNATLOOK</code> ioctl）</li>
+        <li><strong>Linux</strong>：内核 3.7+ 且支持 nftables</li>
+        <li>Rust 1.70+ 和 Cargo（从源码构建时需要）</li>
+        <li>Root 权限（用于 NAT 查找和绑定端口 53）</li>
         <li>一个上游 HTTP CONNECT 代理（例如 Squid、privoxy 或任何支持 CONNECT 的代理）</li>
       </ul>
     </div>
@@ -1024,10 +1029,10 @@
       <h3 style="margin-bottom: 16px;">流量流程</h3>
       <ol class="flow-list">
         <li><strong>客户端</strong>发送数据包到 <code>example.com:443</code>（解析为 <code>93.184.216.34</code>）</li>
-        <li><strong>数据包到达</strong> Mac 的局域网接口（Mac 作为网关）</li>
-        <li><strong>pf rdr 规则</strong>将目标地址重写为 <code>127.0.0.1:8443</code></li>
+        <li><strong>数据包到达</strong>网关的局域网接口</li>
+        <li><strong>NAT 重定向规则</strong>将目标地址重写为 <code>127.0.0.1:8443</code>（macOS 使用 pf，Linux 使用 nftables）</li>
         <li><strong>trans_proxy</strong> 接受连接</li>
-        <li><strong>DIOCNATLOOK</strong> ioctl 从 pf 的 NAT 状态表中恢复原始目标地址（<code>93.184.216.34:443</code>）</li>
+        <li>通过 <strong>DIOCNATLOOK</strong>（macOS）或 <strong>SO_ORIGINAL_DST</strong>（Linux）恢复原始目标地址（<code>93.184.216.34:443</code>）</li>
         <li><strong>SNI 提取</strong>窥探 TLS ClientHello 以读取主机名（<code>example.com</code>）</li>
         <li>向上游代理发送 <strong><code>CONNECT example.com:443</code></strong></li>
         <li>在客户端和上游代理之间进行<strong>双向中继</strong></li>
@@ -1049,12 +1054,12 @@
         </div>
       </div>
 
-      <h3 style="margin-top: 32px; margin-bottom: 12px;">为什么使用 DIOCNATLOOK？</h3>
+      <h3 style="margin-top: 32px; margin-bottom: 12px;">原始目标地址恢复</h3>
       <p style="color: var(--text-muted); font-size: 0.9rem;">
-        macOS pf 的 <code>rdr</code> 规则在套接字层看到之前就重写了目标地址。
-        对已接受的连接调用 <code>getsockname()</code> 返回的是代理自身的地址，而非原始目标地址。
-        <code>DIOCNATLOOK</code> ioctl 查询 pf 的 NAT 状态表以恢复原始目标地址 &mdash;
-        这与 mitmproxy 使用的方法相同。
+        NAT 重定向规则会在套接字层看到之前就重写目标地址。
+        trans_proxy 使用平台特定机制恢复原始目标地址：
+        macOS 上使用 <code>DIOCNATLOOK</code>（查询 pf 的 NAT 状态表，与 mitmproxy 相同），
+        Linux 上使用 <code>SO_ORIGINAL_DST</code>（从内核的连接跟踪中恢复重定向前的目标地址）。
       </p>
     </div>
   </section>
@@ -1064,7 +1069,7 @@
     <div class="container">
       <h2>客户端设置</h2>
       <p style="color: var(--text-muted); margin-bottom: 16px;">
-        在每个需要通过代理路由的设备上，将 Mac 的 IP 设置为默认网关和 DNS 服务器。
+        在每个需要通过代理路由的设备上，将网关机器的 IP 设置为默认网关和 DNS 服务器。
       </p>
 
       <div class="client-grid">

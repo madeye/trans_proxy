@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>trans_proxy — Transparent Proxy for macOS</title>
-  <meta name="description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <title>trans_proxy — Transparent Proxy for macOS & Linux</title>
+  <meta name="description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta name="author" content="Max Lv">
 
   <!-- Open Graph / Facebook -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://madeye.github.io/trans_proxy/">
-  <meta property="og:title" content="trans_proxy — Transparent Proxy for macOS">
-  <meta property="og:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <meta property="og:title" content="trans_proxy — Transparent Proxy for macOS & Linux">
+  <meta property="og:description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta property="og:site_name" content="trans_proxy">
 
   <meta property="og:image" content="https://madeye.github.io/trans_proxy/icon.png">
@@ -19,8 +19,8 @@
   <!-- Twitter / X -->
   <meta name="twitter:card" content="summary">
   <meta name="twitter:url" content="https://madeye.github.io/trans_proxy/">
-  <meta name="twitter:title" content="trans_proxy — Transparent Proxy for macOS">
-  <meta name="twitter:description" content="A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <meta name="twitter:title" content="trans_proxy — Transparent Proxy for macOS & Linux">
+  <meta name="twitter:description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta name="twitter:image" content="https://madeye.github.io/trans_proxy/icon.png">
 
   <!-- Favicon -->
@@ -399,7 +399,7 @@
     <div class="container">
       <h1><code>trans_proxy</code></h1>
       <p class="tagline">
-        A transparent proxy for macOS that intercepts TCP traffic via pf and forwards it through an upstream HTTP CONNECT proxy.
+        A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy.
       </p>
       <div class="hero-buttons">
         <a href="https://github.com/madeye/trans_proxy/releases/latest" class="btn btn-primary">Download</a>
@@ -824,8 +824,12 @@
       <h2>Features</h2>
       <div class="features">
         <div class="feature">
-          <h3>pf Integration</h3>
+          <h3>macOS pf Integration</h3>
           <p>Uses <code>DIOCNATLOOK</code> ioctl on <code>/dev/pf</code> to recover original destinations from pf's NAT state table &mdash; the same technique mitmproxy uses.</p>
+        </div>
+        <div class="feature">
+          <h3>Linux nftables Integration</h3>
+          <p>Uses <code>SO_ORIGINAL_DST</code> getsockopt to recover original destinations from nftables redirect rules.</p>
         </div>
         <div class="feature">
           <h3>SNI Extraction</h3>
@@ -836,16 +840,16 @@
           <p>Listens directly on the gateway interface (port 53) for LAN client DNS queries. Builds an IP&rarr;domain lookup table. Supports DoH and UDP upstream.</p>
         </div>
         <div class="feature">
-          <h3>Safe pf Anchors</h3>
-          <p>Uses anchor-based pf rules so your existing firewall configuration is never touched or overwritten.</p>
+          <h3>Safe Firewall Rules</h3>
+          <p>Uses anchor-based pf rules (macOS) or a dedicated nftables table (Linux) so your existing firewall configuration is never touched.</p>
         </div>
         <div class="feature">
           <h3>Daemon Mode</h3>
           <p>Run as a background process with PID file and log file support. Start with <code>-d</code>, stop with <code>kill</code>.</p>
         </div>
         <div class="feature">
-          <h3>launchd Service</h3>
-          <p>Install as a macOS LaunchDaemon for automatic startup on boot and crash recovery. Use <code>--install</code> and <code>--uninstall</code>.</p>
+          <h3>System Service</h3>
+          <p>Install as a system service (launchd on macOS, systemd on Linux) for automatic startup on boot. Use <code>--install</code> and <code>--uninstall</code>.</p>
         </div>
         <div class="feature">
           <h3>Async I/O</h3>
@@ -860,9 +864,10 @@
     <div class="container">
       <h2>Requirements</h2>
       <ul style="color: var(--text-muted); padding-left: 20px; font-size: 0.95rem; line-height: 2;">
-        <li>macOS 12+ (uses pf and <code>DIOCNATLOOK</code> ioctl)</li>
-        <li>Rust 1.70+ and Cargo</li>
-        <li>Root privileges (for <code>/dev/pf</code> access and pf rule management)</li>
+        <li><strong>macOS</strong>: macOS 12+ (uses pf and <code>DIOCNATLOOK</code> ioctl)</li>
+        <li><strong>Linux</strong>: Kernel 3.7+ with nftables</li>
+        <li>Rust 1.70+ and Cargo (for building from source)</li>
+        <li>Root privileges (for NAT lookups and port 53 binding)</li>
         <li>An upstream HTTP CONNECT proxy (e.g., Squid, privoxy, or any CONNECT-capable proxy)</li>
       </ul>
     </div>
@@ -1024,10 +1029,10 @@
       <h3 style="margin-bottom: 16px;">Traffic Flow</h3>
       <ol class="flow-list">
         <li><strong>Client</strong> sends a packet to <code>example.com:443</code> (resolved to <code>93.184.216.34</code>)</li>
-        <li><strong>Packet arrives</strong> on the Mac's LAN interface (the Mac is the gateway)</li>
-        <li><strong>pf rdr rule</strong> rewrites the destination to <code>127.0.0.1:8443</code></li>
+        <li><strong>Packet arrives</strong> on the gateway's LAN interface</li>
+        <li><strong>NAT redirect rule</strong> rewrites the destination to <code>127.0.0.1:8443</code> (pf on macOS, nftables on Linux)</li>
         <li><strong>trans_proxy</strong> accepts the connection</li>
-        <li><strong>DIOCNATLOOK</strong> ioctl recovers the original destination (<code>93.184.216.34:443</code>) from pf's NAT state table</li>
+        <li><strong>Original destination recovered</strong> via <code>DIOCNATLOOK</code> (macOS) or <code>SO_ORIGINAL_DST</code> (Linux)</li>
         <li><strong>SNI extraction</strong> peeks at the TLS ClientHello to read the hostname (<code>example.com</code>)</li>
         <li>Sends <strong><code>CONNECT example.com:443</code></strong> to the upstream proxy</li>
         <li><strong>Bidirectional relay</strong> between client and upstream proxy</li>
@@ -1049,12 +1054,12 @@
         </div>
       </div>
 
-      <h3 style="margin-top: 32px; margin-bottom: 12px;">Why DIOCNATLOOK?</h3>
+      <h3 style="margin-top: 32px; margin-bottom: 12px;">Original Destination Recovery</h3>
       <p style="color: var(--text-muted); font-size: 0.9rem;">
-        macOS pf's <code>rdr</code> rules rewrite the destination address <em>before</em> the socket layer sees it.
-        <code>getsockname()</code> on the accepted connection returns the proxy's own address, not the original destination.
-        The <code>DIOCNATLOOK</code> ioctl queries pf's NAT state table to recover the original destination &mdash;
-        this is the same approach used by mitmproxy.
+        NAT redirect rules rewrite the destination address <em>before</em> the socket layer sees it.
+        trans_proxy recovers the original destination using platform-specific mechanisms:
+        <code>DIOCNATLOOK</code> on macOS (queries pf's NAT state table, same as mitmproxy) and
+        <code>SO_ORIGINAL_DST</code> on Linux (recovers the pre-redirect destination from the kernel's conntrack).
       </p>
     </div>
   </section>
@@ -1064,7 +1069,7 @@
     <div class="container">
       <h2>Client Setup</h2>
       <p style="color: var(--text-muted); margin-bottom: 16px;">
-        On each device you want to route through the proxy, set the Mac's IP as the default gateway and DNS server.
+        On each device you want to route through the proxy, set the gateway machine's IP as the default gateway and DNS server.
       </p>
 
       <div class="client-grid">

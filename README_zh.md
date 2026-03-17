@@ -2,12 +2,12 @@
 
 [English](README.md)
 
-一个适用于 macOS 的透明代理，拦截由 pf 重定向的 TCP 流量，并通过上游 HTTP CONNECT 代理进行转发。
+一个适用于 macOS 和 Linux 的透明代理，拦截由操作系统防火墙重定向的 TCP 流量，并通过上游 HTTP CONNECT 代理进行转发。
 
-设计用于在作为局域网中其他设备的旁路由（网关）的 Mac 上运行。
+设计用于在作为局域网中其他设备旁路由（网关）的机器上运行。
 
 ```
-[客户端设备] --网关--> [macOS pf rdr] --> [trans_proxy :8443]
+[客户端设备] --网关--> [NAT 重定向] --> [trans_proxy :8443]
                                                       |
                                                       v
                                                  [上游 HTTP CONNECT 代理]
@@ -18,19 +18,21 @@
 
 ## 功能特性
 
-- **pf 集成** — 使用 `/dev/pf` 上的 `DIOCNATLOOK` ioctl 从 pf 的 NAT 状态表中恢复原始目标地址
+- **macOS pf 集成** — 使用 `/dev/pf` 上的 `DIOCNATLOOK` ioctl 从 pf 的 NAT 状态表中恢复原始目标地址
+- **Linux nftables 集成** — 使用 `SO_ORIGINAL_DST` getsockopt 从 nftables 重定向中恢复原始目标地址
 - **SNI 提取** — 窥探 TLS ClientHello 以提取主机名，发送正确的 `CONNECT host:port` 而非原始 IP
-- **DNS 转发器** — 直接监听网关接口（端口 53）的局域网客户端 DNS 查询，构建 IP→域名查找表。支持 DNS-over-HTTPS (DoH) 和传统 UDP 上游。
-- **基于 Anchor 的 pf 规则** — 不会覆盖你现有的防火墙配置
+- **DNS 转发器** — 直接监听网关接口（端口 53）的局域网客户端 DNS 查询，构建 IP→域名查找表。支持 DNS-over-HTTPS (DoH)（HTTP/2 连接池、TTL 缓存、查询合并）和传统 UDP 上游。
+- **基于 Anchor 的 pf 规则**（macOS）/ **nftables 表**（Linux）— 不会覆盖现有防火墙配置
 - **守护进程模式** — 作为后台进程运行，支持 PID 文件和日志文件
-- **launchd 服务** — 安装为 macOS LaunchDaemon，开机自动启动
+- **系统服务** — macOS 使用 launchd，Linux 使用 systemd
 - **异步 I/O** — 基于 tokio 构建，每个连接独立任务调度
 
 ## 系统要求
 
-- macOS 12+（使用 pf 和 `DIOCNATLOOK` ioctl）
-- Rust 1.70+ 和 Cargo
-- Root 权限（用于访问 `/dev/pf` 和绑定端口 53）
+- **macOS**：macOS 12+（使用 pf 和 `DIOCNATLOOK` ioctl）
+- **Linux**：内核 3.7+ 且支持 nftables
+- Rust 1.70+ 和 Cargo（从源码构建时需要）
+- Root 权限（用于 NAT 查找和绑定端口 53）
 - 一个上游 HTTP CONNECT 代理（例如 Squid、mitmproxy 或任何支持 CONNECT 的代理）
 
 ## 构建
@@ -57,6 +59,8 @@ cargo test
 
 ## 快速开始
 
+### macOS
+
 本示例假设你的上游 HTTP 代理运行在 `127.0.0.1:1082`，局域网接口为 `en0`。
 
 ```bash
@@ -65,19 +69,33 @@ sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
   --dns
 
-# 或以守护进程方式运行
-sudo ./target/release/trans_proxy \
-  --upstream-proxy 127.0.0.1:1082 \
-  --dns -d
-
-# 第 2 步：设置 pf 重定向（在另一个终端中，或使用 -d 时在同一终端中）
+# 第 2 步：设置 pf 重定向
 sudo scripts/pf_setup.sh en0 8443
 
 # 第 3 步：配置客户端设备（参见下方"客户端设置"）
 
 # 第 4 步：使用完毕后，拆除配置
 sudo scripts/pf_teardown.sh
-# 如果以守护进程方式运行，停止它
+sudo kill $(cat /var/run/trans_proxy.pid)
+```
+
+### Linux
+
+本示例假设你的上游 HTTP 代理运行在 `127.0.0.1:7890`，局域网接口为 `eth0`。
+
+```bash
+# 第 1 步：启动透明代理，并启用 DNS
+sudo ./trans_proxy \
+  --upstream-proxy 127.0.0.1:7890 \
+  --dns --interface eth0
+
+# 第 2 步：设置 nftables 重定向
+sudo scripts/nftables_setup.sh eth0 8443
+
+# 第 3 步：配置客户端设备（参见下方"客户端设置"）
+
+# 第 4 步：使用完毕后，拆除配置
+sudo scripts/nftables_teardown.sh
 sudo kill $(cat /var/run/trans_proxy.pid)
 ```
 
@@ -85,7 +103,7 @@ sudo kill $(cat /var/run/trans_proxy.pid)
 
 ### 启动代理
 
-代理需要 root 权限才能打开 `/dev/pf` 进行 NAT 查找：
+代理需要 root 权限进行 NAT 查找（macOS 上为 `/dev/pf`，Linux 上为 `SO_ORIGINAL_DST`）：
 
 ```bash
 # 最简配置 — 仅代理，不启用 DNS
@@ -137,51 +155,36 @@ sudo ./target/release/trans_proxy \
 | `--upstream-proxy` | *（必填）* | 上游 HTTP CONNECT 代理地址（`host:port`） |
 | `--log-level` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error` |
 | `--dns` | 关闭 | 在网关接口上启用 DNS 转发器（端口 53） |
-| `--interface` | `en0` | DNS 自动检测使用的网络接口（与 `--dns` 配合使用） |
+| `--interface` | `en0`（macOS）/ `eth0`（Linux） | DNS 自动检测使用的网络接口（与 `--dns` 配合使用） |
 | `--dns-listen` | *（自动）* | 覆盖 DNS 监听地址（例如 `192.168.1.42:53`） |
 | `--dns-upstream` | `https://cloudflare-dns.com/dns-query` | 上游 DNS：UDP 使用 `host:port`，DoH 使用 `https://` URL |
 | `-d` / `--daemon` | 关闭 | 以后台守护进程方式运行 |
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID 文件路径（与 `--daemon` 配合使用） |
 | `--log-file` | `/var/log/trans_proxy.log`（守护进程）/ stderr | 日志文件路径 |
-| `--install` | 关闭 | 安装为 macOS launchd 服务（LaunchDaemon） |
-| `--uninstall` | 关闭 | 卸载 macOS launchd 服务 |
+| `--install` | 关闭 | 安装为系统服务（macOS 使用 launchd，Linux 使用 systemd） |
+| `--uninstall` | 关闭 | 卸载系统服务 |
 
-### 设置 pf 重定向
+### 设置 NAT 重定向
 
-附带的脚本通过 anchor 管理 pf 规则（不会干扰现有的防火墙规则）。
-DNS 不再需要 pf 重定向 — trans_proxy 直接监听端口 53。
+#### macOS (pf)
 
 ```bash
-# 设置 HTTP/HTTPS 重定向
 sudo scripts/pf_setup.sh <interface> [proxy_port]
 sudo scripts/pf_setup.sh en0 8443
-```
 
-设置脚本会打印网关 IP 和配置摘要：
-
-```
-==> Enabling IP forwarding
-==> Loading pf anchor 'trans_proxy'
-==> Enabling pf
-==> Verifying anchor rules
-
-Done.
-  Gateway IP:  192.168.1.42 (en0)
-  HTTP/HTTPS:  ports 80,443 -> 127.0.0.1:8443
-  DNS:         use --dns flag to listen on 192.168.1.42:53 directly
-
-Configure client devices to use 192.168.1.42 as their gateway.
-Set DNS server to 192.168.1.42 on client devices.
-Run scripts/pf_teardown.sh to undo.
-```
-
-拆除配置：
-
-```bash
+# 拆除配置
 sudo scripts/pf_teardown.sh
 ```
 
-这会清除 anchor 规则并禁用 IP 转发。pf 本身保持启用状态 — 运行 `sudo pfctl -d` 可完全禁用。
+#### Linux (nftables)
+
+```bash
+sudo scripts/nftables_setup.sh <interface> [proxy_port]
+sudo scripts/nftables_setup.sh eth0 8443
+
+# 拆除配置
+sudo scripts/nftables_teardown.sh
+```
 
 ### 守护进程模式
 
@@ -207,40 +210,23 @@ sudo kill $(cat /var/run/trans_proxy.pid)
 - 日志写入文件（默认 `/var/log/trans_proxy.log`）而非 stderr
 - 退出时自动清理 PID 文件
 
-### 服务安装（launchd）
+### 服务安装
 
-将 trans_proxy 安装为 macOS LaunchDaemon，使其在开机时自动启动，崩溃后自动重启：
+安装为系统服务，开机自动启动：
 
 ```bash
-# 使用你需要的选项进行安装
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
   --dns --install
 ```
 
-这将会：
-- 将二进制文件复制到 `/usr/local/bin/trans_proxy`
-- 在 `/Library/LaunchDaemons/com.github.madeye.trans_proxy.plist` 生成 launchd plist 文件
-- 配置 `RunAtLoad` 和 `KeepAlive` 以实现自动启动和重启
-- 日志输出到 `/var/log/trans_proxy.log`
-- 立即加载并启动服务
-
-使用 `launchctl` 管理服务：
-
-```bash
-sudo launchctl stop  com.github.madeye.trans_proxy
-sudo launchctl start com.github.madeye.trans_proxy
-```
+**macOS** 上安装为 LaunchDaemon，**Linux** 上安装为 systemd 服务。
 
 卸载：
 
 ```bash
 sudo trans_proxy --uninstall
 ```
-
-这会卸载服务、删除 plist 文件并移除已安装的二进制文件。
-
-**注意：** 使用 `--install` 时不需要 `--daemon`、`--pid-file` 和 `--log-file` 参数 — launchd 会直接管理进程生命周期。
 
 ### 客户端设置
 
@@ -269,10 +255,10 @@ echo "nameserver <gateway_ip>" | sudo tee /etc/resolv.conf
 ### 流量流程
 
 1. 客户端设备发送数据包到 `example.com:443`（解析为例如 `93.184.216.34`）
-2. 数据包到达 Mac 的局域网接口（Mac 是网关）
-3. macOS pf `rdr` 规则将目标地址重写为 `127.0.0.1:8443`
+2. 数据包到达网关的局域网接口
+3. NAT 重定向规则将目标地址重写为 `127.0.0.1:8443`（macOS 使用 pf，Linux 使用 nftables）
 4. trans_proxy 接受连接
-5. `DIOCNATLOOK` ioctl 从 pf 的 NAT 状态表中恢复原始目标地址（`93.184.216.34:443`）
+5. 恢复原始目标地址（macOS 使用 `DIOCNATLOOK`，Linux 使用 `SO_ORIGINAL_DST`）
 6. trans_proxy 窥探 TLS ClientHello 以提取 SNI（`example.com`）
 7. 向上游代理发送 `CONNECT example.com:443 HTTP/1.1`
 8. 在客户端和上游代理之间进行双向数据中继
@@ -285,27 +271,34 @@ echo "nameserver <gateway_ip>" | sudo tee /etc/resolv.conf
 2. **DNS 表查找** — 如果启用了 `--dns`，内置 DNS 转发器会从 A 记录响应中记录 IP→域名映射。适用于 HTTP（端口 80）和 HTTPS（端口 443）。
 3. **原始 IP** — 如果无法确定主机名，则回退到 IP 地址。
 
-### 为什么使用 DIOCNATLOOK？
+### 原始目标地址恢复
 
-macOS pf 的 `rdr` 规则会在套接字层看到之前重写目标地址。这意味着在已接受的连接上调用 `getsockname()` 返回的是代理自身的地址，而非原始目标地址。`DIOCNATLOOK` ioctl 查询 pf 的 NAT 状态表以恢复原始目标地址 — 这与 mitmproxy 使用的方法相同。
+NAT 重定向规则会在套接字层看到之前重写目标地址。trans_proxy 使用平台特定的机制恢复原始目标地址：
+
+- **macOS**：`DIOCNATLOOK` ioctl 查询 pf 的 NAT 状态表（与 mitmproxy 使用的方法相同）
+- **Linux**：`SO_ORIGINAL_DST` getsockopt 从已接受的套接字 fd 恢复重定向前的目标地址
 
 ## 故障排除
 
-### "Failed to open /dev/pf"
+### macOS："Failed to open /dev/pf"
 使用 `sudo` 运行。代理需要 root 权限才能访问 `/dev/pf`。
 
-### "No ALTQ support in kernel"
+### macOS："No ALTQ support in kernel"
 这是 `pfctl` 的无害警告。macOS 不包含 ALTQ — pf 重定向功能在没有它的情况下也能正常工作。
 
-### "DIOCNATLOOK failed"
+### macOS："DIOCNATLOOK failed"
 - 确保 pf 规则已加载：`sudo pfctl -a trans_proxy -s rules`
 - 确保 pf 已启用：`sudo pfctl -s info | head -1`
 - 检查流量是否确实到达了预期的接口
 
+### Linux："SO_ORIGINAL_DST failed"
+- 确保 nftables 重定向规则生效：`sudo nft list table ip trans_proxy`
+- 确保 IP 转发已启用：`sysctl net.ipv4.ip_forward`（应为 `1`）
+
 ### 连接挂起或超时
 - 验证上游代理是否正在运行并接受 CONNECT 请求
 - 使用 `--log-level debug` 查看详细的每连接日志
-- 确保 IP 转发已启用：`sysctl net.inet.ip.forwarding`（应为 `1`）
+- 确保 IP 转发已启用
 
 ### 客户端设备 DNS 无法解析
 - 确保已设置 `--dns` 且 DNS 转发器正在运行

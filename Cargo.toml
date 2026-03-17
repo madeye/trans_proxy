@@ -1,6 +1,6 @@
 [package]
 name = "trans_proxy"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Transparent proxy with upstream HTTP CONNECT proxy support (macOS pf, Linux nftables)"
 license = "MIT"
