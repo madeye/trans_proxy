@@ -225,10 +225,15 @@ impl QueryCoalescer {
 }
 
 /// Run the DNS forwarder, dispatching to UDP or DoH based on upstream config.
-pub async fn run(listen_addr: SocketAddr, upstream: DnsUpstream, table: DnsTable) -> Result<()> {
+pub async fn run(
+    listen_addr: SocketAddr,
+    upstream: DnsUpstream,
+    table: DnsTable,
+    upstream_proxy: SocketAddr,
+) -> Result<()> {
     match upstream {
         DnsUpstream::Udp(addr) => run_udp(listen_addr, addr, table).await,
-        DnsUpstream::Https(url) => run_doh(listen_addr, url, table).await,
+        DnsUpstream::Https(url) => run_doh(listen_addr, url, table, upstream_proxy).await,
     }
 }
 
@@ -371,7 +376,7 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
 ///
 /// Uses HTTP/2 connection pooling, a TTL-aware response cache, and query
 /// coalescing to minimize DoH round-trips.
-async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> Result<()> {
+async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable, upstream_proxy: SocketAddr) -> Result<()> {
     let socket = Arc::new(
         UdpSocket::bind(listen_addr)
             .await
@@ -382,13 +387,16 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
         listen_addr, doh_url
     );
 
-    // Build an HTTP/2-capable client with connection keep-alive
+    // Build an HTTP/2-capable client that routes through the upstream proxy
+    let proxy_url = format!("http://{}", upstream_proxy);
+    let proxy = reqwest::Proxy::all(&proxy_url).context("Invalid upstream proxy URL for DoH")?;
     let client = reqwest::Client::builder()
-        .http2_prior_knowledge()
+        .proxy(proxy)
         .pool_max_idle_per_host(2)
         .pool_idle_timeout(Duration::from_secs(300))
         .build()
         .context("Failed to build HTTP client for DoH")?;
+    info!("DoH requests routed through upstream proxy {}", upstream_proxy);
 
     let cache = Arc::new(DnsCache::new());
     let coalescer = Arc::new(QueryCoalescer::new());

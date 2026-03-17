@@ -121,8 +121,9 @@ fn main() -> Result<()> {
         if let Some(dns_listen) = config.resolve_dns_listen() {
             let table = dns_table.clone();
             let upstream = config.dns_upstream.clone();
+            let upstream_proxy = config.upstream_proxy;
             tokio::spawn(async move {
-                if let Err(e) = dns::run(dns_listen, upstream, table).await {
+                if let Err(e) = dns::run(dns_listen, upstream, table, upstream_proxy).await {
                     tracing::error!("DNS forwarder failed: {:#}", e);
                 }
             });
