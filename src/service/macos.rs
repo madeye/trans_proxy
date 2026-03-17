@@ -7,6 +7,8 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
+use super::{check_root, filter_service_args, run_cmd, set_executable};
+
 const PLIST_LABEL: &str = "com.github.madeye.trans_proxy";
 const PLIST_PATH: &str = "/Library/LaunchDaemons/com.github.madeye.trans_proxy.plist";
 const INSTALL_BIN: &str = "/usr/local/bin/trans_proxy";
@@ -22,8 +24,8 @@ pub fn install(args: &[String]) -> Result<()> {
     check_root()?;
 
     // Get the path to the currently running binary
-    let current_exe = std::env::current_exe()
-        .context("Failed to determine current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("Failed to determine current executable path")?;
 
     // Copy binary to /usr/local/bin
     println!("Installing binary to {INSTALL_BIN}...");
@@ -150,48 +152,6 @@ fn generate_plist(args: &[String]) -> String {
     )
 }
 
-/// Filter out service/daemon-related arguments that shouldn't appear in the plist.
-/// Launchd manages the process lifecycle, so `--daemon`, `--pid-file`, `--log-file`,
-/// `--install`, and `--uninstall` are not needed.
-fn filter_service_args(args: &[String]) -> Vec<String> {
-    let skip_flags = ["--install", "--uninstall", "--daemon", "-d"];
-    let skip_with_value = ["--pid-file", "--log-file"];
-
-    let mut result = Vec::new();
-    let mut skip_next = false;
-
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-
-        if skip_flags.contains(&arg.as_str()) {
-            continue;
-        }
-
-        // Handle --flag=value and --flag value forms
-        let mut matched = false;
-        for prefix in &skip_with_value {
-            if arg == *prefix {
-                skip_next = true;
-                matched = true;
-                break;
-            }
-            if arg.starts_with(&format!("{prefix}=")) {
-                matched = true;
-                break;
-            }
-        }
-
-        if !matched {
-            result.push(arg.clone());
-        }
-    }
-
-    result
-}
-
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -199,26 +159,3 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-
-fn check_root() -> Result<()> {
-    if unsafe { libc::geteuid() } != 0 {
-        bail!("This command must be run as root (use sudo)");
-    }
-    Ok(())
-}
-
-fn set_executable(path: &str) -> Result<()> {
-    run_cmd("chmod", &["755", path])
-}
-
-fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(cmd)
-        .args(args)
-        .status()
-        .with_context(|| format!("Failed to run {cmd}"))?;
-    if !status.success() {
-        bail!("{cmd} failed (exit code: {:?})", status.code());
-    }
-    Ok(())
-}
-

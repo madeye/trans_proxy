@@ -43,8 +43,13 @@ pub async fn connect_via_proxy(
         Some(h) => h.to_string(),
         None => dest.ip().to_string(),
     };
-    let request = format!("CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n",
-        host, dest.port(), host, dest.port());
+    let request = format!(
+        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n",
+        host,
+        dest.port(),
+        host,
+        dest.port()
+    );
 
     timeout(CONNECT_TIMEOUT, stream.write_all(request.as_bytes()))
         .await
@@ -60,7 +65,9 @@ pub async fn connect_via_proxy(
             if filled >= MAX_RESPONSE_SIZE {
                 bail!("CONNECT response too large");
             }
-            let n = stream.read(&mut buf[filled..]).await
+            let n = stream
+                .read(&mut buf[filled..])
+                .await
                 .context("Failed to read CONNECT response")?;
             if n == 0 {
                 bail!("Connection closed during CONNECT handshake");

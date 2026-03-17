@@ -1,4 +1,4 @@
-//! Original destination recovery for pf-redirected connections.
+//! Original destination recovery for pf-redirected connections on macOS.
 //!
 //! When macOS pf's `rdr` rule rewrites a packet's destination, the original
 //! target is stored in pf's NAT state table. This module queries that table
@@ -26,6 +26,7 @@ use anyhow::{Context, Result};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
+use tokio::net::TcpStream;
 
 /// pf address wrapper matching struct pf_addr (union, we only use v4)
 #[repr(C)]
@@ -82,18 +83,18 @@ const IPPROTO_TCP: u8 = libc::IPPROTO_TCP as u8;
 const PF_OUT: u8 = 1; // We look up outbound NAT translations (rdr rewrites inbound, but state is PF_OUT for reply direction)
 
 /// Handle to /dev/pf for NAT lookups.
-pub struct PfHandle {
+pub struct NatHandle {
     fd: RawFd,
 }
 
 // The fd is only used for ioctl reads, safe to share across threads.
-unsafe impl Send for PfHandle {}
-unsafe impl Sync for PfHandle {}
+unsafe impl Send for NatHandle {}
+unsafe impl Sync for NatHandle {}
 
-impl PfHandle {
+impl NatHandle {
     /// Open /dev/pf. Requires root privileges.
     pub fn open() -> Result<Arc<Self>> {
-        let fd = unsafe { libc::open(b"/dev/pf\0".as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        let fd = unsafe { libc::open(c"/dev/pf".as_ptr(), libc::O_RDONLY) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error())
                 .context("Failed to open /dev/pf (are you running as root?)");
@@ -102,7 +103,7 @@ impl PfHandle {
     }
 }
 
-impl Drop for PfHandle {
+impl Drop for NatHandle {
     fn drop(&mut self) {
         unsafe {
             libc::close(self.fd);
@@ -110,7 +111,7 @@ impl Drop for PfHandle {
     }
 }
 
-impl AsRawFd for PfHandle {
+impl AsRawFd for NatHandle {
     fn as_raw_fd(&self) -> RawFd {
         self.fd
     }
@@ -120,15 +121,17 @@ impl AsRawFd for PfHandle {
 ///
 /// `client_addr`: the source address of the incoming connection
 /// `local_addr`: the address the connection arrived on (proxy listen addr after rdr)
-pub fn get_original_dest_pf(
-    pf: &PfHandle,
+fn get_original_dest_pf(
+    pf: &NatHandle,
     client_addr: SocketAddrV4,
     local_addr: SocketAddrV4,
 ) -> Result<SocketAddrV4> {
-    let mut nl = PfiocNatlook::default();
-    nl.af = AF_INET;
-    nl.proto = IPPROTO_TCP;
-    nl.direction = PF_OUT;
+    let mut nl = PfiocNatlook {
+        af: AF_INET,
+        proto: IPPROTO_TCP,
+        direction: PF_OUT,
+        ..PfiocNatlook::default()
+    };
 
     // Source: the client
     nl.saddr.addr[..4].copy_from_slice(&client_addr.ip().octets());
@@ -161,8 +164,10 @@ pub fn get_original_dest_pf(
 /// Determine original destination for a connection.
 ///
 /// Tries DIOCNATLOOK first, falls back to getsockname check.
+/// The `_stream` parameter is unused on macOS (needed on Linux for SO_ORIGINAL_DST).
 pub fn get_original_dest(
-    pf: &PfHandle,
+    pf: &NatHandle,
+    _stream: &TcpStream,
     client_addr: SocketAddr,
     local_addr: SocketAddr,
     listen_addr: SocketAddr,

@@ -19,7 +19,7 @@ pub fn daemonize(pid_file: &Path) -> Result<()> {
     // First fork
     match unsafe { libc::fork() } {
         -1 => bail!("First fork failed: {}", std::io::Error::last_os_error()),
-        0 => {} // child continues
+        0 => {}                     // child continues
         _ => std::process::exit(0), // parent exits
     }
 
@@ -31,7 +31,7 @@ pub fn daemonize(pid_file: &Path) -> Result<()> {
     // Second fork (prevent reacquiring a terminal)
     match unsafe { libc::fork() } {
         -1 => bail!("Second fork failed: {}", std::io::Error::last_os_error()),
-        0 => {} // grandchild continues as daemon
+        0 => {}                     // grandchild continues as daemon
         _ => std::process::exit(0), // first child exits
     }
 
@@ -42,7 +42,7 @@ pub fn daemonize(pid_file: &Path) -> Result<()> {
 
     // Redirect stdio to /dev/null
     unsafe {
-        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
         if devnull >= 0 {
             libc::dup2(devnull, libc::STDIN_FILENO);
             libc::dup2(devnull, libc::STDOUT_FILENO);

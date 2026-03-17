@@ -2,18 +2,16 @@
 name = "trans_proxy"
 version = "0.3.0"
 edition = "2021"
-description = "Transparent proxy for macOS pf redirection with upstream HTTP CONNECT proxy support"
+description = "Transparent proxy with upstream HTTP CONNECT proxy support (macOS pf, Linux iptables)"
 license = "MIT"
 repository = "https://github.com/madeye/trans_proxy"
 authors = ["Max Lv <max.c.lv@gmail.com>"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-socket2 = "0.5"
 clap = { version = "4", features = ["derive"] }
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_info"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 libc = "0.2"
-nix = { version = "0.29", features = ["ioctl"] }

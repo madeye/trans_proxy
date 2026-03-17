@@ -31,9 +31,12 @@ impl std::str::FromStr for DnsUpstream {
         if s.starts_with("https://") {
             Ok(DnsUpstream::Https(s.to_string()))
         } else {
-            s.parse::<SocketAddr>()
-                .map(DnsUpstream::Udp)
-                .map_err(|e| format!("invalid DNS upstream '{}': expected socket address or https:// URL: {}", s, e))
+            s.parse::<SocketAddr>().map(DnsUpstream::Udp).map_err(|e| {
+                format!(
+                    "invalid DNS upstream '{}': expected socket address or https:// URL: {}",
+                    s, e
+                )
+            })
         }
     }
 }
@@ -42,8 +45,16 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+#[cfg(target_os = "macos")]
+const DEFAULT_INTERFACE: &str = "en0";
+#[cfg(target_os = "linux")]
+const DEFAULT_INTERFACE: &str = "eth0";
+
 #[derive(Parser, Debug, Clone)]
-#[command(name = "trans_proxy", about = "Transparent proxy for macOS pf redirection")]
+#[command(
+    name = "trans_proxy",
+    about = "Transparent proxy with upstream HTTP CONNECT support"
+)]
 pub struct Config {
     /// Address to listen on
     #[arg(long, default_value = "0.0.0.0:8443")]
@@ -72,7 +83,7 @@ pub struct Config {
     pub dns_upstream: DnsUpstream,
 
     /// Network interface for DNS binding (e.g., en0). Used with --dns to auto-detect IP.
-    #[arg(long, default_value = "en0")]
+    #[arg(long, default_value = DEFAULT_INTERFACE)]
     pub interface: String,
 
     /// Run as a background daemon
@@ -87,11 +98,11 @@ pub struct Config {
     #[arg(long)]
     pub log_file: Option<std::path::PathBuf>,
 
-    /// Install as a macOS launchd service (LaunchDaemon)
+    /// Install as a system service (launchd on macOS, systemd on Linux)
     #[arg(long)]
     pub install: bool,
 
-    /// Uninstall the macOS launchd service
+    /// Uninstall the system service
     #[arg(long)]
     pub uninstall: bool,
 }
@@ -106,17 +117,79 @@ impl Config {
             return Some(addr);
         }
         if self.dns {
-            let ip = get_interface_ip(&self.interface)
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "Warning: could not detect IP for interface '{}', using 0.0.0.0",
-                        self.interface
-                    );
-                    Ipv4Addr::UNSPECIFIED
-                });
+            let ip = get_interface_ip(&self.interface).unwrap_or_else(|| {
+                eprintln!(
+                    "Warning: could not detect IP for interface '{}', using 0.0.0.0",
+                    self.interface
+                );
+                Ipv4Addr::UNSPECIFIED
+            });
             return Some(SocketAddr::new(ip.into(), 53));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_interface() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(DEFAULT_INTERFACE, "en0");
+        #[cfg(target_os = "linux")]
+        assert_eq!(DEFAULT_INTERFACE, "eth0");
+    }
+
+    #[test]
+    fn test_dns_upstream_parse_https() {
+        let upstream: DnsUpstream = "https://1.1.1.1/dns-query".parse().unwrap();
+        match upstream {
+            DnsUpstream::Https(url) => assert_eq!(url, "https://1.1.1.1/dns-query"),
+            _ => panic!("expected Https variant"),
+        }
+    }
+
+    #[test]
+    fn test_dns_upstream_parse_udp() {
+        let upstream: DnsUpstream = "8.8.8.8:53".parse().unwrap();
+        match upstream {
+            DnsUpstream::Udp(addr) => assert_eq!(addr.to_string(), "8.8.8.8:53"),
+            _ => panic!("expected Udp variant"),
+        }
+    }
+
+    #[test]
+    fn test_dns_upstream_parse_invalid() {
+        let result: Result<DnsUpstream, _> = "not-valid".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dns_upstream_display() {
+        let udp: DnsUpstream = "8.8.8.8:53".parse().unwrap();
+        assert_eq!(format!("{}", udp), "8.8.8.8:53");
+
+        let https: DnsUpstream = "https://1.1.1.1/dns-query".parse().unwrap();
+        assert_eq!(format!("{}", https), "https://1.1.1.1/dns-query");
+    }
+
+    #[test]
+    fn test_get_interface_ip_loopback() {
+        // lo0 on macOS, lo on Linux — test whichever exists
+        #[cfg(target_os = "macos")]
+        let result = get_interface_ip("lo0");
+        #[cfg(target_os = "linux")]
+        let result = get_interface_ip("lo");
+
+        assert_eq!(result, Some(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_get_interface_ip_nonexistent() {
+        let result = get_interface_ip("nonexistent_iface_xyz");
+        assert_eq!(result, None);
     }
 }
 
@@ -141,7 +214,7 @@ fn get_interface_ip(name: &str) -> Option<Ipv4Addr> {
 
             if ifa_name == ifname.as_c_str() && !ifa.ifa_addr.is_null() {
                 let sa = &*ifa.ifa_addr;
-                if sa.sa_family == libc::AF_INET as u8 {
+                if sa.sa_family as libc::c_int == libc::AF_INET {
                     let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
                     result = Some(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)));
                     break;

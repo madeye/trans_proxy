@@ -1,13 +1,16 @@
 //! # trans_proxy
 //!
-//! A transparent proxy for macOS that intercepts TCP traffic redirected by
-//! [`pf(4)`](https://man.openbsd.org/pf) and forwards it through an upstream
-//! HTTP CONNECT proxy.
+//! A transparent proxy that intercepts TCP traffic redirected by the OS
+//! firewall and forwards it through an upstream HTTP CONNECT proxy.
+//!
+//! Supports:
+//! - **macOS**: pf `rdr` rules with `DIOCNATLOOK` ioctl for original destination recovery
+//! - **Linux**: iptables `REDIRECT` rules with `SO_ORIGINAL_DST` getsockopt
 //!
 //! ## Architecture
 //!
 //! ```text
-//! [Client devices] ──gateway──> [macOS pf rdr] ──> [trans_proxy :8443]
+//! [Client devices] ──gateway──> [NAT redirect] ──> [trans_proxy :8443]
 //!                                                       │
 //!                                                       ▼
 //!                                                  [Upstream HTTP CONNECT proxy]
@@ -20,8 +23,8 @@
 //!
 //! - [`config`] — CLI argument parsing via clap
 //! - [`daemon`] — Unix double-fork daemonization with PID file management
-//! - [`service`] — macOS launchd service installation and removal
-//! - [`orig_dest`] — Original destination recovery using `DIOCNATLOOK` ioctl
+//! - [`service`] — System service installation (launchd on macOS, systemd on Linux)
+//! - [`orig_dest`] — Original destination recovery (pf on macOS, SO_ORIGINAL_DST on Linux)
 //! - [`sni`] — TLS ClientHello SNI extraction
 //! - [`dns`] — DNS forwarder on gateway interface port 53 (UDP and DoH upstream)
 //! - [`tunnel`] — HTTP CONNECT tunnel establishment
@@ -30,13 +33,13 @@
 //! ## Usage
 //!
 //! ```bash
-//! # Foreground with DNS on interface en0 (port 53)
+//! # Foreground with DNS
 //! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 --dns
 //!
 //! # Daemon mode
 //! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 --dns -d
 //!
-//! # Install as a launchd service
+//! # Install as a system service
 //! sudo trans_proxy --upstream-proxy 127.0.0.1:1082 --dns --install
 //! ```
 
@@ -76,8 +79,7 @@ fn main() -> Result<()> {
     }
 
     // Set up logging — write to file in daemon mode, stderr otherwise
-    let filter = EnvFilter::try_new(&config.log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let log_file = config.log_file.clone().or_else(|| {
         if config.daemon {
@@ -99,9 +101,7 @@ fn main() -> Result<()> {
             .with_ansi(false)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
     info!("Log level: {}", config.log_level);

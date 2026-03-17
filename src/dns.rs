@@ -94,7 +94,10 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
     let socket = UdpSocket::bind(listen_addr)
         .await
         .context("Failed to bind DNS listener")?;
-    info!("DNS forwarder listening on {}, upstream UDP {}", listen_addr, upstream_dns);
+    info!(
+        "DNS forwarder listening on {}, upstream UDP {}",
+        listen_addr, upstream_dns
+    );
 
     let upstream_socket = UdpSocket::bind("0.0.0.0:0")
         .await
@@ -140,11 +143,8 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
                     Err(_) => continue,
                 };
                 // Collect all entries matching this tx_id (multiple clients may share the same ID)
-                let matching_keys: Vec<(u16, SocketAddr)> = map
-                    .keys()
-                    .filter(|(id, _)| *id == tx_id)
-                    .copied()
-                    .collect();
+                let matching_keys: Vec<(u16, SocketAddr)> =
+                    map.keys().filter(|(id, _)| *id == tx_id).copied().collect();
                 matching_keys
                     .into_iter()
                     .filter_map(|key| map.remove(&key).map(|name| (key.1, name)))
@@ -171,7 +171,14 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
             info!(
                 "DNS response: {} -> {} (tx_id=0x{:04x}, clients={})",
                 query_name,
-                resolved_ips.as_ref().map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "no A records".into()),
+                resolved_ips
+                    .as_ref()
+                    .map(|ips| ips
+                        .iter()
+                        .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","))
+                    .unwrap_or_else(|| "no A records".into()),
                 tx_id,
                 client_addrs.join(",")
             );
@@ -200,7 +207,10 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
         // Extract the query name for later use
         let query_name = parse_query_name(packet).unwrap_or_default();
 
-        debug!("DNS query from {}: {} (tx_id=0x{:04x})", client_addr, query_name, tx_id);
+        debug!(
+            "DNS query from {}: {} (tx_id=0x{:04x})",
+            client_addr, query_name, tx_id
+        );
 
         // Store pending query keyed by (tx_id, client_addr) to avoid collisions
         if let Ok(mut map) = pending.write() {
@@ -224,7 +234,10 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
             .await
             .context("Failed to bind DNS listener")?,
     );
-    info!("DNS forwarder listening on {}, upstream DoH {}", listen_addr, doh_url);
+    info!(
+        "DNS forwarder listening on {}, upstream DoH {}",
+        listen_addr, doh_url
+    );
 
     let client = reqwest::Client::builder()
         .build()
@@ -263,7 +276,14 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
                     info!(
                         "DNS response (DoH): {} -> {} (client={})",
                         query_name,
-                        resolved_ips.as_ref().map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "no A records".into()),
+                        resolved_ips
+                            .as_ref()
+                            .map(|ips| ips
+                                .iter()
+                                .map(|ip| ip.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","))
+                            .unwrap_or_else(|| "no A records".into()),
                         client_addr
                     );
 
@@ -295,7 +315,10 @@ async fn doh_query(client: &reqwest::Client, url: &str, query: &[u8]) -> Result<
         anyhow::bail!("DoH server returned status {}", response.status());
     }
 
-    let bytes = response.bytes().await.context("Failed to read DoH response body")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("Failed to read DoH response body")?;
     Ok(bytes.to_vec())
 }
 
@@ -375,7 +398,12 @@ fn parse_a_records(packet: &[u8]) -> Option<Vec<Ipv4Addr>> {
         }
 
         if rtype == DNS_TYPE_A && rclass == DNS_CLASS_IN && rdlength == 4 {
-            let ip = Ipv4Addr::new(packet[pos], packet[pos + 1], packet[pos + 2], packet[pos + 3]);
+            let ip = Ipv4Addr::new(
+                packet[pos],
+                packet[pos + 1],
+                packet[pos + 2],
+                packet[pos + 3],
+            );
             ips.push(ip);
         }
 
@@ -446,7 +474,7 @@ mod tests {
     #[test]
     fn test_parse_query_name() {
         let mut pkt = vec![0u8; 12]; // dummy header
-        // "example.com"
+                                     // "example.com"
         pkt.push(7);
         pkt.extend_from_slice(b"example");
         pkt.push(3);
@@ -497,7 +525,9 @@ mod tests {
     #[tokio::test]
     async fn test_dns_udp_query_response_logging() {
         // Set up tracing so debug! calls execute
-        let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
 
         // Bind a fake upstream DNS server
         let fake_upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -531,7 +561,10 @@ mod tests {
         let (n, from_addr) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fake_upstream.recv_from(&mut buf),
-        ).await.unwrap().unwrap();
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         // Verify the query was forwarded
         assert!(n >= 12);
@@ -545,7 +578,10 @@ mod tests {
         let (n, _) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client_socket.recv_from(&mut buf),
-        ).await.unwrap().unwrap();
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(n >= 12);
 
         // Verify the DNS table was populated (proves the info!/debug! code paths ran)

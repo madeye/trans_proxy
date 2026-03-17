@@ -17,26 +17,31 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::dns::DnsTable;
-use crate::orig_dest::{get_original_dest, PfHandle};
+use crate::orig_dest::{get_original_dest, NatHandle};
 use crate::sni::extract_sni;
 use crate::tunnel::connect_via_proxy;
 
 /// Run the transparent proxy accept loop.
 pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
-    let pf = PfHandle::open()?;
+    let nat_handle = NatHandle::open()?;
+    #[cfg(target_os = "macos")]
     info!("Opened /dev/pf for NAT lookups");
+    #[cfg(target_os = "linux")]
+    info!("NAT handle ready (SO_ORIGINAL_DST)");
 
     let listener = TcpListener::bind(config.listen_addr).await?;
     info!("Listening on {}", config.listen_addr);
 
     loop {
         let (stream, client_addr) = listener.accept().await?;
-        let pf = Arc::clone(&pf);
+        let nat_handle = Arc::clone(&nat_handle);
         let config = config.clone();
         let dns_table = dns_table.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, client_addr, &pf, &config, &dns_table).await {
+            if let Err(e) =
+                handle_connection(stream, client_addr, &nat_handle, &config, &dns_table).await
+            {
                 warn!("{} [failed] {:#}", client_addr, e);
             }
         });
@@ -46,13 +51,19 @@ pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
 async fn handle_connection(
     mut inbound: TcpStream,
     client_addr: SocketAddr,
-    pf: &PfHandle,
+    nat_handle: &NatHandle,
     config: &Config,
     dns_table: &DnsTable,
 ) -> Result<()> {
     let local_addr = inbound.local_addr()?;
 
-    let orig_dest = get_original_dest(pf, client_addr, local_addr, config.listen_addr)?;
+    let orig_dest = get_original_dest(
+        nat_handle,
+        &inbound,
+        client_addr,
+        local_addr,
+        config.listen_addr,
+    )?;
 
     // Try to extract SNI hostname from TLS ClientHello (port 443 traffic)
     let sni_hostname = if orig_dest.port() == 443 {
@@ -89,20 +100,14 @@ async fn handle_connection(
     };
     info!("{} -> {} [connecting]", client_addr, dest_display);
 
-    let mut outbound = connect_via_proxy(
-        config.upstream_proxy,
-        orig_dest,
-        hostname.as_deref(),
-    ).await?;
+    let mut outbound =
+        connect_via_proxy(config.upstream_proxy, orig_dest, hostname.as_deref()).await?;
     debug!("{} -> {} [tunnel established]", client_addr, dest_display);
 
     let (client_bytes, server_bytes) = copy_bidirectional(&mut inbound, &mut outbound).await?;
     info!(
         "{} -> {} [closed] tx={} rx={}",
-        client_addr,
-        dest_display,
-        client_bytes,
-        server_bytes
+        client_addr, dest_display, client_bytes, server_bytes
     );
 
     Ok(())
