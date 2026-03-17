@@ -1,6 +1,6 @@
-//! Original destination recovery for iptables REDIRECT on Linux.
+//! Original destination recovery for nftables redirect on Linux.
 //!
-//! When iptables `REDIRECT` rewrites a packet's destination, the original
+//! When nftables `redirect` rewrites a packet's destination, the original
 //! target can be recovered using `getsockopt(SO_ORIGINAL_DST)` on the
 //! accepted socket fd.
 
@@ -10,7 +10,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 
-/// NAT handle for Linux. No shared resource needed — SO_ORIGINAL_DST
+/// NAT handle for Linux. No shared resource needed -- SO_ORIGINAL_DST
 /// works directly on each accepted socket.
 pub struct NatHandle;
 
@@ -79,7 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_original_dest_non_redirected_socket() {
-        // A plain TCP connection (not redirected by iptables) should fail
+        // A plain TCP connection (not redirected by nftables) should fail
         // because SO_ORIGINAL_DST has no NAT state to return
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listen_addr = listener.local_addr().unwrap();
@@ -99,7 +99,7 @@ mod tests {
             "0.0.0.0:8443".parse().unwrap(),
         );
 
-        // Should fail: socket was not redirected by iptables
+        // Should fail: socket was not redirected by nftables
         assert!(result.is_err());
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(

@@ -33,15 +33,19 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::config::DnsUpstream;
 
 const MAX_DNS_PACKET: usize = 1500;
 const MAX_CACHE_ENTRIES: usize = 10_000;
+const MIN_TTL: u32 = 30;
+const MAX_TTL: u32 = 3600;
 
 // DNS header flags / record types
 const DNS_TYPE_A: u16 = 1;
@@ -77,6 +81,145 @@ impl DnsTable {
                 }
             }
             map.insert(ip, domain);
+        }
+    }
+}
+
+/// Cached DNS response with expiration.
+struct DnsCacheEntry {
+    response: Vec<u8>,
+    expires: Instant,
+}
+
+/// TTL-aware DNS response cache for DoH.
+struct DnsCache {
+    entries: RwLock<HashMap<String, DnsCacheEntry>>,
+}
+
+impl DnsCache {
+    fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Look up a cached response, returning it with the transaction ID rewritten.
+    fn get(&self, name: &str, tx_id: u16) -> Option<Vec<u8>> {
+        let map = self.entries.read().ok()?;
+        let entry = map.get(name)?;
+        if entry.expires <= Instant::now() {
+            return None;
+        }
+        let mut resp = entry.response.clone();
+        // Rewrite transaction ID to match the current query
+        if resp.len() >= 2 {
+            let id_bytes = tx_id.to_be_bytes();
+            resp[0] = id_bytes[0];
+            resp[1] = id_bytes[1];
+        }
+        Some(resp)
+    }
+
+    /// Cache a response, extracting the minimum TTL from answer records.
+    fn put(&self, name: &str, response: &[u8]) {
+        let ttl = extract_min_ttl(response).unwrap_or(MIN_TTL).clamp(MIN_TTL, MAX_TTL);
+        let entry = DnsCacheEntry {
+            response: response.to_vec(),
+            expires: Instant::now() + Duration::from_secs(ttl as u64),
+        };
+        if let Ok(mut map) = self.entries.write() {
+            // Simple eviction when cache is full
+            if map.len() >= MAX_CACHE_ENTRIES {
+                let stale: Vec<String> = map
+                    .iter()
+                    .filter(|(_, v)| v.expires <= Instant::now())
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in stale {
+                    map.remove(&k);
+                }
+                // If still full, drop half
+                if map.len() >= MAX_CACHE_ENTRIES {
+                    let keys: Vec<String> = map.keys().take(MAX_CACHE_ENTRIES / 2).cloned().collect();
+                    for k in keys {
+                        map.remove(&k);
+                    }
+                }
+            }
+            map.insert(name.to_string(), entry);
+        }
+    }
+}
+
+/// Extract the minimum TTL from answer records in a DNS response.
+fn extract_min_ttl(packet: &[u8]) -> Option<u32> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let ancount = u16::from_be_bytes([packet[6], packet[7]]) as usize;
+    if ancount == 0 {
+        return None;
+    }
+    let mut pos = 12;
+    let qdcount = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    for _ in 0..qdcount {
+        pos = skip_dns_name(packet, pos)?;
+        pos += 4;
+        if pos > packet.len() {
+            return None;
+        }
+    }
+    let mut min_ttl = u32::MAX;
+    for _ in 0..ancount {
+        pos = skip_dns_name(packet, pos)?;
+        if pos + 10 > packet.len() {
+            break;
+        }
+        let ttl = u32::from_be_bytes([packet[pos + 4], packet[pos + 5], packet[pos + 6], packet[pos + 7]]);
+        let rdlength = u16::from_be_bytes([packet[pos + 8], packet[pos + 9]]) as usize;
+        pos += 10 + rdlength;
+        if ttl < min_ttl {
+            min_ttl = ttl;
+        }
+    }
+    if min_ttl == u32::MAX {
+        None
+    } else {
+        Some(min_ttl)
+    }
+}
+
+/// In-flight query coalescer: deduplicates concurrent DoH queries for the same domain.
+struct QueryCoalescer {
+    in_flight: RwLock<HashMap<String, broadcast::Sender<Vec<u8>>>>,
+}
+
+impl QueryCoalescer {
+    fn new() -> Self {
+        Self {
+            in_flight: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Try to join an existing in-flight query. Returns a receiver if one exists.
+    fn try_join(&self, name: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
+        let map = self.in_flight.read().ok()?;
+        map.get(name).map(|tx| tx.subscribe())
+    }
+
+    /// Register a new in-flight query. Returns the sender to broadcast the result.
+    fn register(&self, name: &str) -> broadcast::Sender<Vec<u8>> {
+        let (tx, _) = broadcast::channel(1);
+        if let Ok(mut map) = self.in_flight.write() {
+            map.insert(name.to_string(), tx.clone());
+        }
+        tx
+    }
+
+    /// Remove a completed in-flight query.
+    fn complete(&self, name: &str) {
+        if let Ok(mut map) = self.in_flight.write() {
+            map.remove(name);
         }
     }
 }
@@ -226,8 +369,8 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
 
 /// Run the DNS forwarder with a DNS-over-HTTPS upstream (RFC 8484).
 ///
-/// Each client query is forwarded as an HTTP POST with `application/dns-message`
-/// content type. The raw DNS wire-format response is sent back to the client.
+/// Uses HTTP/2 connection pooling, a TTL-aware response cache, and query
+/// coalescing to minimize DoH round-trips.
 async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> Result<()> {
     let socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -239,9 +382,16 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
         listen_addr, doh_url
     );
 
+    // Build an HTTP/2-capable client with connection keep-alive
     let client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .pool_max_idle_per_host(2)
+        .pool_idle_timeout(Duration::from_secs(300))
         .build()
         .context("Failed to build HTTP client for DoH")?;
+
+    let cache = Arc::new(DnsCache::new());
+    let coalescer = Arc::new(QueryCoalescer::new());
 
     let mut buf = vec![0u8; MAX_DNS_PACKET];
     loop {
@@ -253,29 +403,100 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
         }
 
         let query_name = parse_query_name(&packet).unwrap_or_default();
+        let tx_id = u16::from_be_bytes([packet[0], packet[1]]);
 
         debug!("DNS query from {}: {} (DoH)", client_addr, query_name);
+
+        // Fast path: serve from cache
+        if let Some(cached) = cache.get(&query_name, tx_id) {
+            // Still populate the DNS table from cached response
+            let resolved_ips = parse_a_records(&cached);
+            if let Some(ref ips) = resolved_ips {
+                for ip in ips {
+                    table.insert(*ip, query_name.clone());
+                }
+            }
+            info!(
+                "DNS response (DoH/cached): {} -> {} (client={})",
+                query_name,
+                resolved_ips
+                    .as_ref()
+                    .map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(","))
+                    .unwrap_or_else(|| "no A records".into()),
+                client_addr
+            );
+            if let Err(e) = socket.send_to(&cached, client_addr).await {
+                warn!("DNS: failed to send cached response to {}: {}", client_addr, e);
+            }
+            continue;
+        }
+
+        // Coalesce: if another task is already querying this domain, wait for its result
+        if let Some(mut rx) = coalescer.try_join(&query_name) {
+            let socket = Arc::clone(&socket);
+            let table = table.clone();
+            let query_name = query_name.clone();
+            tokio::spawn(async move {
+                match rx.recv().await {
+                    Ok(response) => {
+                        // Rewrite tx_id for this client
+                        let mut resp = response;
+                        if resp.len() >= 2 {
+                            let id_bytes = tx_id.to_be_bytes();
+                            resp[0] = id_bytes[0];
+                            resp[1] = id_bytes[1];
+                        }
+                        let resolved_ips = parse_a_records(&resp);
+                        if let Some(ref ips) = resolved_ips {
+                            for ip in ips {
+                                table.insert(*ip, query_name.clone());
+                            }
+                        }
+                        if let Err(e) = socket.send_to(&resp, client_addr).await {
+                            warn!("DNS: failed to send coalesced response to {}: {}", client_addr, e);
+                        }
+                    }
+                    Err(_) => {
+                        warn!("DNS: coalesced query for {} dropped", query_name);
+                    }
+                }
+            });
+            continue;
+        }
+
+        // Register this query as in-flight
+        let tx = coalescer.register(&query_name);
 
         let socket = Arc::clone(&socket);
         let client = client.clone();
         let doh_url = doh_url.clone();
         let table = table.clone();
+        let cache = Arc::clone(&cache);
+        let coalescer = Arc::clone(&coalescer);
+        let query_name_owned = query_name.clone();
 
         tokio::spawn(async move {
             match doh_query(&client, &doh_url, &packet).await {
                 Ok(response) => {
+                    // Cache the response
+                    cache.put(&query_name_owned, &response);
+
+                    // Broadcast to coalesced waiters
+                    let _ = tx.send(response.clone());
+                    coalescer.complete(&query_name_owned);
+
                     // Parse A records and populate the table
                     let resolved_ips = parse_a_records(&response);
                     if let Some(ref ips) = resolved_ips {
                         for ip in ips {
-                            debug!("DNS resolved: {} -> {} (DoH)", query_name, ip);
-                            table.insert(*ip, query_name.clone());
+                            debug!("DNS resolved: {} -> {} (DoH)", query_name_owned, ip);
+                            table.insert(*ip, query_name_owned.clone());
                         }
                     }
 
                     info!(
                         "DNS response (DoH): {} -> {} (client={})",
-                        query_name,
+                        query_name_owned,
                         resolved_ips
                             .as_ref()
                             .map(|ips| ips
@@ -287,13 +508,14 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable) -> R
                         client_addr
                     );
 
-                    // Send response back to client
+                    // Send response back to the original client
                     if let Err(e) = socket.send_to(&response, client_addr).await {
                         warn!("DNS: failed to send DoH response to {}: {}", client_addr, e);
                     }
                 }
                 Err(e) => {
-                    warn!("DoH query for {} failed: {:#}", query_name, e);
+                    coalescer.complete(&query_name_owned);
+                    warn!("DoH query for {} failed: {:#}", query_name_owned, e);
                 }
             }
         });
@@ -518,6 +740,34 @@ mod tests {
         pkt.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
         pkt.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
         pkt
+    }
+
+    #[test]
+    fn test_dns_cache_hit_and_miss() {
+        let cache = DnsCache::new();
+        let ip = Ipv4Addr::new(93, 184, 216, 34);
+        let pkt = build_dns_response("example.com", ip);
+
+        // Miss
+        assert!(cache.get("example.com", 0x1234).is_none());
+
+        // Put and hit
+        cache.put("example.com", &pkt);
+        let cached = cache.get("example.com", 0x1234).unwrap();
+        assert!(cached.len() >= 12);
+        // Verify tx_id was rewritten
+        assert_eq!(cached[0], 0x12);
+        assert_eq!(cached[1], 0x34);
+        // Verify A record is still parseable
+        let ips = parse_a_records(&cached).unwrap();
+        assert_eq!(ips, vec![ip]);
+    }
+
+    #[test]
+    fn test_extract_min_ttl() {
+        let pkt = build_dns_response("example.com", Ipv4Addr::new(1, 2, 3, 4));
+        // Our test builder uses TTL=60
+        assert_eq!(extract_min_ttl(&pkt), Some(60));
     }
 
     /// Integration test: runs the UDP DNS forwarder with a fake upstream,

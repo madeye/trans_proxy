@@ -5,7 +5,7 @@
 //!
 //! Supports:
 //! - **macOS**: pf `rdr` rules with `DIOCNATLOOK` ioctl for original destination recovery
-//! - **Linux**: iptables `REDIRECT` rules with `SO_ORIGINAL_DST` getsockopt
+//! - **Linux**: nftables `redirect` rules with `SO_ORIGINAL_DST` getsockopt
 //!
 //! ## Architecture
 //!
