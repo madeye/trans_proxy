@@ -10,6 +10,25 @@ set -euo pipefail
 IFACE="${1:?Usage: $0 <interface> [proxy_port]}"
 PORT="${2:-8443}"
 
+# Validate interface exists
+if [ ! -d "/sys/class/net/$IFACE" ]; then
+    echo "Error: network interface '$IFACE' does not exist." >&2
+    echo "Available interfaces: $(ls /sys/class/net/ | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+# Validate port is numeric and in range
+if ! echo "$PORT" | grep -qE '^[0-9]+$' || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "Error: invalid port '$PORT' (must be 1-65535)." >&2
+    exit 1
+fi
+
+# Remove existing rules to avoid duplicates
+if nft list table ip trans_proxy &>/dev/null; then
+    echo "Removing existing trans_proxy nftables table..."
+    nft delete table ip trans_proxy
+fi
+
 echo "Enabling IP forwarding..."
 sysctl -w net.ipv4.ip_forward=1
 
