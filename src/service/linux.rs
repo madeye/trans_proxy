@@ -209,7 +209,9 @@ mod tests {
         assert!(unit.contains(
             "ExecStart=/usr/local/bin/trans_proxy --upstream-proxy 127.0.0.1:1082 --dns --interface eth0"
         ));
-        assert!(unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443"));
+        assert!(
+            unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443")
+        );
         assert!(unit.contains("ExecStopPost=/usr/local/lib/trans_proxy/nftables_teardown.sh"));
     }
 
@@ -222,7 +224,9 @@ mod tests {
         // Should not have trailing space
         assert!(!unit.contains("ExecStart=/usr/local/bin/trans_proxy "));
         // Defaults: eth0 interface, 8443 port
-        assert!(unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443"));
+        assert!(
+            unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443")
+        );
     }
 
     #[test]
@@ -237,7 +241,9 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        assert!(unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh wlan0 9999"));
+        assert!(
+            unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh wlan0 9999")
+        );
         assert!(unit.contains("ExecStopPost=/usr/local/lib/trans_proxy/nftables_teardown.sh"));
     }
 

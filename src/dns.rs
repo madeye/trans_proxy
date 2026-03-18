@@ -122,7 +122,9 @@ impl DnsCache {
 
     /// Cache a response, extracting the minimum TTL from answer records.
     fn put(&self, name: &str, response: &[u8]) {
-        let ttl = extract_min_ttl(response).unwrap_or(MIN_TTL).clamp(MIN_TTL, MAX_TTL);
+        let ttl = extract_min_ttl(response)
+            .unwrap_or(MIN_TTL)
+            .clamp(MIN_TTL, MAX_TTL);
         let entry = DnsCacheEntry {
             response: response.to_vec(),
             expires: Instant::now() + Duration::from_secs(ttl as u64),
@@ -140,7 +142,8 @@ impl DnsCache {
                 }
                 // If still full, drop half
                 if map.len() >= MAX_CACHE_ENTRIES {
-                    let keys: Vec<String> = map.keys().take(MAX_CACHE_ENTRIES / 2).cloned().collect();
+                    let keys: Vec<String> =
+                        map.keys().take(MAX_CACHE_ENTRIES / 2).cloned().collect();
                     for k in keys {
                         map.remove(&k);
                     }
@@ -175,7 +178,12 @@ fn extract_min_ttl(packet: &[u8]) -> Option<u32> {
         if pos + 10 > packet.len() {
             break;
         }
-        let ttl = u32::from_be_bytes([packet[pos + 4], packet[pos + 5], packet[pos + 6], packet[pos + 7]]);
+        let ttl = u32::from_be_bytes([
+            packet[pos + 4],
+            packet[pos + 5],
+            packet[pos + 6],
+            packet[pos + 7],
+        ]);
         let rdlength = u16::from_be_bytes([packet[pos + 8], packet[pos + 9]]) as usize;
         pos += 10 + rdlength;
         if ttl < min_ttl {
@@ -376,7 +384,12 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
 ///
 /// Uses HTTP/2 connection pooling, a TTL-aware response cache, and query
 /// coalescing to minimize DoH round-trips.
-async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable, upstream_proxy: SocketAddr) -> Result<()> {
+async fn run_doh(
+    listen_addr: SocketAddr,
+    doh_url: String,
+    table: DnsTable,
+    upstream_proxy: SocketAddr,
+) -> Result<()> {
     let socket = Arc::new(
         UdpSocket::bind(listen_addr)
             .await
@@ -396,7 +409,10 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable, upst
         .pool_idle_timeout(Duration::from_secs(300))
         .build()
         .context("Failed to build HTTP client for DoH")?;
-    info!("DoH requests routed through upstream proxy {}", upstream_proxy);
+    info!(
+        "DoH requests routed through upstream proxy {}",
+        upstream_proxy
+    );
 
     let cache = Arc::new(DnsCache::new());
     let coalescer = Arc::new(QueryCoalescer::new());
@@ -429,12 +445,19 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable, upst
                 query_name,
                 resolved_ips
                     .as_ref()
-                    .map(|ips| ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(","))
+                    .map(|ips| ips
+                        .iter()
+                        .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","))
                     .unwrap_or_else(|| "no A records".into()),
                 client_addr
             );
             if let Err(e) = socket.send_to(&cached, client_addr).await {
-                warn!("DNS: failed to send cached response to {}: {}", client_addr, e);
+                warn!(
+                    "DNS: failed to send cached response to {}: {}",
+                    client_addr, e
+                );
             }
             continue;
         }
@@ -461,7 +484,10 @@ async fn run_doh(listen_addr: SocketAddr, doh_url: String, table: DnsTable, upst
                             }
                         }
                         if let Err(e) = socket.send_to(&resp, client_addr).await {
-                            warn!("DNS: failed to send coalesced response to {}: {}", client_addr, e);
+                            warn!(
+                                "DNS: failed to send coalesced response to {}: {}",
+                                client_addr, e
+                            );
                         }
                     }
                     Err(_) => {
