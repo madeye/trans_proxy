@@ -10,6 +10,12 @@ use super::{check_root, filter_service_args, run_cmd, set_executable};
 
 const UNIT_PATH: &str = "/etc/systemd/system/trans_proxy.service";
 const INSTALL_BIN: &str = "/usr/local/bin/trans_proxy";
+const SCRIPTS_DIR: &str = "/usr/local/lib/trans_proxy";
+const SETUP_SCRIPT: &str = "/usr/local/lib/trans_proxy/nftables_setup.sh";
+const TEARDOWN_SCRIPT: &str = "/usr/local/lib/trans_proxy/nftables_teardown.sh";
+
+const SETUP_SCRIPT_CONTENT: &str = include_str!("../../scripts/nftables_setup.sh");
+const TEARDOWN_SCRIPT_CONTENT: &str = include_str!("../../scripts/nftables_teardown.sh");
 
 /// Install trans_proxy as a systemd service.
 ///
@@ -32,6 +38,17 @@ pub fn install(args: &[String]) -> Result<()> {
     // Make sure it's executable
     set_executable(INSTALL_BIN)?;
 
+    // Install nftables scripts
+    println!("Installing nftables scripts to {SCRIPTS_DIR}/...");
+    std::fs::create_dir_all(SCRIPTS_DIR)
+        .with_context(|| format!("Failed to create {SCRIPTS_DIR}"))?;
+    std::fs::write(SETUP_SCRIPT, SETUP_SCRIPT_CONTENT)
+        .with_context(|| format!("Failed to write {SETUP_SCRIPT}"))?;
+    std::fs::write(TEARDOWN_SCRIPT, TEARDOWN_SCRIPT_CONTENT)
+        .with_context(|| format!("Failed to write {TEARDOWN_SCRIPT}"))?;
+    set_executable(SETUP_SCRIPT)?;
+    set_executable(TEARDOWN_SCRIPT)?;
+
     // Generate and write the unit file
     let unit = generate_unit(args);
     println!("Writing systemd unit to {UNIT_PATH}...");
@@ -44,8 +61,9 @@ pub fn install(args: &[String]) -> Result<()> {
     run_cmd("systemctl", &["enable", "--now", "trans_proxy"])?;
 
     println!("Service installed and started successfully.");
-    println!("  Binary: {INSTALL_BIN}");
-    println!("  Unit:   {UNIT_PATH}");
+    println!("  Binary:  {INSTALL_BIN}");
+    println!("  Scripts: {SCRIPTS_DIR}/");
+    println!("  Unit:    {UNIT_PATH}");
     println!();
     println!("Manage with:");
     println!("  sudo systemctl stop    trans_proxy");
@@ -89,6 +107,13 @@ pub fn uninstall() -> Result<()> {
         println!("No binary found at {INSTALL_BIN}, skipping.");
     }
 
+    let scripts_dir = Path::new(SCRIPTS_DIR);
+    if scripts_dir.exists() {
+        println!("Removing {SCRIPTS_DIR}/...");
+        std::fs::remove_dir_all(scripts_dir)
+            .with_context(|| format!("Failed to remove {SCRIPTS_DIR}"))?;
+    }
+
     // Reload systemd
     let _ = std::process::Command::new("systemctl")
         .args(["daemon-reload"])
@@ -98,11 +123,28 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// Extract a flag's value from args (supports `--flag value` form).
+fn extract_arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            return iter.next().map(|s| s.as_str());
+        }
+        if let Some(val) = arg.strip_prefix(&format!("{flag}=")) {
+            return Some(val);
+        }
+    }
+    None
+}
+
 /// Build the systemd unit file from the proxy arguments.
 ///
 /// The generated unit runs trans_proxy in foreground mode (no `--daemon`)
 /// since systemd manages the process lifecycle. Arguments like `--install`,
 /// `--uninstall`, `--daemon`, `--pid-file`, and `--log-file` are filtered out.
+///
+/// Includes `ExecStartPre` and `ExecStopPost` to set up and tear down
+/// nftables NAT redirect rules automatically.
 fn generate_unit(args: &[String]) -> String {
     let filtered_args = filter_service_args(args);
 
@@ -112,6 +154,12 @@ fn generate_unit(args: &[String]) -> String {
         format!("{} {}", INSTALL_BIN, filtered_args.join(" "))
     };
 
+    // Extract interface and port for nftables setup
+    let interface = extract_arg(&filtered_args, "--interface").unwrap_or("eth0");
+    let port = extract_arg(&filtered_args, "--listen-addr")
+        .and_then(|addr| addr.rsplit(':').next())
+        .unwrap_or("8443");
+
     format!(
         r#"[Unit]
 Description=Transparent proxy with upstream HTTP CONNECT support
@@ -120,7 +168,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStartPre={SETUP_SCRIPT} {interface} {port}
 ExecStart={exec_start}
+ExecStopPost={TEARDOWN_SCRIPT}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -143,6 +193,8 @@ mod tests {
             "--upstream-proxy".into(),
             "127.0.0.1:1082".into(),
             "--dns".into(),
+            "--interface".into(),
+            "eth0".into(),
         ];
         let unit = generate_unit(&args);
 
@@ -155,8 +207,10 @@ mod tests {
         assert!(unit.contains("WantedBy=multi-user.target"));
         assert!(unit.contains("CAP_NET_ADMIN"));
         assert!(unit.contains(
-            "ExecStart=/usr/local/bin/trans_proxy --upstream-proxy 127.0.0.1:1082 --dns"
+            "ExecStart=/usr/local/bin/trans_proxy --upstream-proxy 127.0.0.1:1082 --dns --interface eth0"
         ));
+        assert!(unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443"));
+        assert!(unit.contains("ExecStopPost=/usr/local/lib/trans_proxy/nftables_teardown.sh"));
     }
 
     #[test]
@@ -167,6 +221,24 @@ mod tests {
         assert!(unit.contains("ExecStart=/usr/local/bin/trans_proxy\n"));
         // Should not have trailing space
         assert!(!unit.contains("ExecStart=/usr/local/bin/trans_proxy "));
+        // Defaults: eth0 interface, 8443 port
+        assert!(unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443"));
+    }
+
+    #[test]
+    fn test_generate_unit_custom_interface_and_port() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--interface".into(),
+            "wlan0".into(),
+            "--listen-addr".into(),
+            "0.0.0.0:9999".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        assert!(unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh wlan0 9999"));
+        assert!(unit.contains("ExecStopPost=/usr/local/lib/trans_proxy/nftables_teardown.sh"));
     }
 
     #[test]
@@ -204,5 +276,21 @@ mod tests {
 
         assert!(unit.contains("After=network-online.target"));
         assert!(unit.contains("Wants=network-online.target"));
+    }
+
+    #[test]
+    fn test_extract_arg() {
+        let args: Vec<String> = vec![
+            "--interface".into(),
+            "wlan0".into(),
+            "--listen-addr".into(),
+            "0.0.0.0:9999".into(),
+        ];
+        assert_eq!(extract_arg(&args, "--interface"), Some("wlan0"));
+        assert_eq!(extract_arg(&args, "--listen-addr"), Some("0.0.0.0:9999"));
+        assert_eq!(extract_arg(&args, "--dns"), None);
+
+        let args_eq: Vec<String> = vec!["--interface=br0".into()];
+        assert_eq!(extract_arg(&args_eq, "--interface"), Some("br0"));
     }
 }
