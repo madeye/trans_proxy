@@ -24,7 +24,7 @@
 - **DNS 转发器** — 直接监听网关接口（端口 53）的局域网客户端 DNS 查询，构建 IP→域名查找表。支持 DNS-over-HTTPS (DoH)（HTTP/2 连接池、TTL 缓存、查询合并）和传统 UDP 上游。
 - **基于 Anchor 的 pf 规则**（macOS）/ **nftables 表**（Linux）— 不会覆盖现有防火墙配置
 - **守护进程模式** — 作为后台进程运行，支持 PID 文件和日志文件
-- **系统服务** — macOS 使用 launchd，Linux 使用 systemd
+- **系统服务** — macOS 使用 launchd，Linux 使用 systemd。Linux 上通过 ExecStartPre/ExecStopPost 自动管理 nftables NAT 规则
 - **异步 I/O** — 基于 tokio 构建，每个连接独立任务调度
 
 ## 系统要求
@@ -220,7 +220,7 @@ sudo ./target/release/trans_proxy \
   --dns --install
 ```
 
-**macOS** 上安装为 LaunchDaemon，**Linux** 上安装为 systemd 服务。
+**macOS** 上安装为 LaunchDaemon，**Linux** 上安装为 systemd 服务（自动管理 nftables 设置/拆除 — 服务启动时创建 NAT 重定向规则，停止时自动移除）。
 
 卸载：
 

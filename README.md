@@ -24,7 +24,7 @@ Designed to run on a machine acting as a side router (gateway) for other devices
 - **DNS forwarder** — Listens directly on the gateway interface (port 53) for LAN client DNS queries, building an IP→domain lookup table. Supports DNS-over-HTTPS (DoH) with HTTP/2 connection pooling, TTL-aware caching, and query coalescing, as well as traditional UDP upstream.
 - **Anchor-based pf rules** (macOS) / **nftables table** (Linux) — Won't clobber your existing firewall config
 - **Daemon mode** — Run as a background process with PID file and log file support
-- **Service install** — launchd on macOS, systemd on Linux
+- **Service install** — launchd on macOS, systemd on Linux. On Linux, nftables NAT rules are automatically managed via ExecStartPre/ExecStopPost
 - **Async I/O** — Built on tokio with per-connection task spawning
 
 ## Requirements
@@ -224,7 +224,7 @@ sudo ./target/release/trans_proxy \
   --dns --install
 ```
 
-On **macOS**, this installs a LaunchDaemon. On **Linux**, this installs a systemd service.
+On **macOS**, this installs a LaunchDaemon. On **Linux**, this installs a systemd service with automatic nftables setup/teardown — NAT redirect rules are created when the service starts and removed when it stops.
 
 To uninstall:
 

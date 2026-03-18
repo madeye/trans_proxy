@@ -849,7 +849,7 @@
         </div>
         <div class="feature">
           <h3>System Service</h3>
-          <p>Install as a system service (launchd on macOS, systemd on Linux) for automatic startup on boot. Use <code>--install</code> and <code>--uninstall</code>.</p>
+          <p>Install as a system service (launchd on macOS, systemd on Linux) for automatic startup on boot. On Linux, nftables NAT rules are auto-managed. Use <code>--install</code> and <code>--uninstall</code>.</p>
         </div>
         <div class="feature">
           <h3>Async I/O</h3>
@@ -1001,12 +1001,12 @@
           <tr>
             <td><code>--install</code></td>
             <td>off</td>
-            <td>Install as a macOS launchd service (LaunchDaemon)</td>
+            <td>Install as a system service (launchd on macOS, systemd on Linux)</td>
           </tr>
           <tr>
             <td><code>--uninstall</code></td>
             <td>off</td>
-            <td>Uninstall the macOS launchd service</td>
+            <td>Uninstall the system service</td>
           </tr>
         </tbody>
       </table>

@@ -849,7 +849,7 @@
         </div>
         <div class="feature">
           <h3>系统服务</h3>
-          <p>安装为系统服务（macOS 使用 launchd，Linux 使用 systemd），开机自动启动。使用 <code>--install</code> 和 <code>--uninstall</code>。</p>
+          <p>安装为系统服务（macOS 使用 launchd，Linux 使用 systemd），开机自动启动。Linux 上自动管理 nftables NAT 规则。使用 <code>--install</code> 和 <code>--uninstall</code>。</p>
         </div>
         <div class="feature">
           <h3>异步 I/O</h3>
@@ -1001,12 +1001,12 @@
           <tr>
             <td><code>--install</code></td>
             <td>off</td>
-            <td>安装为 macOS launchd 服务（LaunchDaemon）</td>
+            <td>安装为系统服务（macOS 使用 launchd，Linux 使用 systemd）</td>
           </tr>
           <tr>
             <td><code>--uninstall</code></td>
             <td>off</td>
-            <td>卸载 macOS launchd 服务</td>
+            <td>卸载系统服务</td>
           </tr>
         </tbody>
       </table>
