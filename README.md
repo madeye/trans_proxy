@@ -190,6 +190,16 @@ sudo scripts/nftables_setup.sh eth0 8443
 sudo scripts/nftables_teardown.sh
 ```
 
+### Linux Kernel Optimization
+
+For high-throughput proxy workloads, optimize kernel parameters and file descriptor limits:
+
+```bash
+sudo scripts/optimize_linux.sh
+```
+
+This tunes sysctl settings (TCP buffers, backlog, connection recycling, TCP Fast Open) and raises file descriptor limits. Based on [shadowsocks optimization guide](https://shadowsocks.org/doc/advanced.html#optimize-the-shadowsocks-server-on-linux).
+
 ### Daemon Mode
 
 Run trans_proxy as a background process:

@@ -186,6 +186,16 @@ sudo scripts/nftables_setup.sh eth0 8443
 sudo scripts/nftables_teardown.sh
 ```
 
+### Linux 内核优化
+
+针对高吞吐量代理工作负载，优化内核参数和文件描述符限制：
+
+```bash
+sudo scripts/optimize_linux.sh
+```
+
+该脚本调整 sysctl 设置（TCP 缓冲区、积压队列、连接回收、TCP Fast Open）并提高文件描述符限制。基于 [shadowsocks 优化指南](https://shadowsocks.org/doc/advanced.html#optimize-the-shadowsocks-server-on-linux)。
+
 ### 守护进程模式
 
 以后台进程方式运行 trans_proxy：
