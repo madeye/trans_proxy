@@ -2,7 +2,7 @@
 
 [中文文档](README_zh.md)
 
-A transparent proxy for macOS and Linux that intercepts TCP traffic redirected by the OS firewall and forwards it through an upstream HTTP CONNECT proxy.
+A transparent proxy for macOS and Linux that intercepts TCP traffic redirected by the OS firewall and forwards it through an upstream HTTP CONNECT or SOCKS5 proxy.
 
 Designed to run on a machine acting as a side router (gateway) for other devices on the LAN.
 
@@ -10,7 +10,7 @@ Designed to run on a machine acting as a side router (gateway) for other devices
 [Client devices] --gateway--> [NAT redirect] --> [trans_proxy :8443]
                                                       |
                                                       v
-                                                 [Upstream HTTP CONNECT proxy]
+                                                 [Upstream proxy (HTTP CONNECT / SOCKS5)]
                                                       |
                                                       v
                                                  [Original destination]
@@ -20,6 +20,7 @@ Designed to run on a machine acting as a side router (gateway) for other devices
 
 - **macOS pf integration** — Uses `DIOCNATLOOK` ioctl on `/dev/pf` to recover original destinations from pf's NAT state table
 - **Linux nftables integration** — Uses `SO_ORIGINAL_DST` getsockopt to recover original destinations from nftables redirect
+- **SOCKS5 upstream support** — Use a SOCKS5 proxy as the upstream, with optional username/password authentication (RFC 1928/1929). Select via `socks5://host:port` or `socks5://user:pass@host:port`
 - **SNI extraction** — Peeks at TLS ClientHello to extract hostnames, sending proper `CONNECT host:port` instead of raw IPs
 - **DNS forwarder** — Listens directly on the gateway interface (port 53) for LAN client DNS queries, building an IP→domain lookup table. Supports DNS-over-HTTPS (DoH) with HTTP/2 connection pooling, TTL-aware caching, and query coalescing, as well as traditional UDP upstream.
 - **Anchor-based pf rules** (macOS) / **nftables table** (Linux) — Won't clobber your existing firewall config
@@ -33,7 +34,7 @@ Designed to run on a machine acting as a side router (gateway) for other devices
 - **Linux**: Kernel 3.7+ with nftables
 - Rust 1.70+ and Cargo (for building from source)
 - Root privileges (for NAT lookups and port 53 binding)
-- An upstream HTTP CONNECT proxy (e.g., Squid, mitmproxy, or any CONNECT-capable proxy)
+- An upstream HTTP CONNECT or SOCKS5 proxy (e.g., Squid, Dante, ssh -D, or any CONNECT/SOCKS5-capable proxy)
 
 ## Build
 
@@ -61,13 +62,19 @@ cargo test
 
 ### macOS
 
-This example assumes your upstream HTTP proxy runs on `127.0.0.1:1082` and your LAN interface is `en0`.
+This example assumes your upstream proxy runs on `127.0.0.1:1082` and your LAN interface is `en0`.
 
 ```bash
 # Step 1: Start the transparent proxy with DNS on the gateway interface
+# HTTP CONNECT upstream:
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
   --dns
+
+# Or with a SOCKS5 upstream:
+# sudo ./target/release/trans_proxy \
+#   --upstream-proxy socks5://127.0.0.1:1080 \
+#   --dns
 
 # Step 2: Set up pf redirection
 sudo scripts/pf_setup.sh en0 8443
@@ -81,7 +88,7 @@ sudo kill $(cat /var/run/trans_proxy.pid)
 
 ### Linux
 
-This example assumes your upstream HTTP proxy runs on `127.0.0.1:7890` and your LAN interface is `eth0`.
+This example assumes your upstream proxy runs on `127.0.0.1:7890` and your LAN interface is `eth0`.
 
 ```bash
 # Step 1: Start the transparent proxy with DNS
@@ -145,6 +152,16 @@ sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
   --dns -d --pid-file /tmp/trans_proxy.pid \
   --log-file /tmp/trans_proxy.log
+
+# Use a SOCKS5 upstream proxy
+sudo ./target/release/trans_proxy \
+  --upstream-proxy socks5://127.0.0.1:1080 \
+  --dns
+
+# SOCKS5 with username/password authentication
+sudo ./target/release/trans_proxy \
+  --upstream-proxy socks5://user:pass@127.0.0.1:1080 \
+  --dns
 ```
 
 ### CLI Options
@@ -152,7 +169,7 @@ sudo ./target/release/trans_proxy \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--listen-addr` | `0.0.0.0:8443` | Address and port the proxy listens on |
-| `--upstream-proxy` | *(required)* | Upstream HTTP CONNECT proxy address (`host:port`) |
+| `--upstream-proxy` | *(required)* | Upstream proxy: `host:port` or `http://host:port` for HTTP CONNECT, `socks5://host:port` or `socks5://user:pass@host:port` for SOCKS5 |
 | `--log-level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `--dns` | off | Enable DNS forwarder on the gateway interface (port 53) |
 | `--interface` | `en0` (macOS) / `eth0` (Linux) | Network interface for DNS auto-detection (used with `--dns`) |
@@ -274,7 +291,7 @@ Settings → Wi-Fi → Long press network → Modify → Advanced → IP setting
 4. trans_proxy accepts the connection
 5. Original destination is recovered (`DIOCNATLOOK` on macOS, `SO_ORIGINAL_DST` on Linux)
 6. trans_proxy peeks at the TLS ClientHello to extract SNI (`example.com`)
-7. Sends `CONNECT example.com:443 HTTP/1.1` to the upstream proxy
+7. Sends `CONNECT example.com:443` to the upstream proxy (HTTP CONNECT or SOCKS5)
 8. Bidirectional relay between client and upstream proxy
 
 ### Hostname Resolution

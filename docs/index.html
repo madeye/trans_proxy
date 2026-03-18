@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>trans_proxy — Transparent Proxy for macOS & Linux</title>
-  <meta name="description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <meta name="description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT or SOCKS5 proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta name="author" content="Max Lv">
 
   <!-- Open Graph / Facebook -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://madeye.github.io/trans_proxy/">
   <meta property="og:title" content="trans_proxy — Transparent Proxy for macOS & Linux">
-  <meta property="og:description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <meta property="og:description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT or SOCKS5 proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta property="og:site_name" content="trans_proxy">
 
   <meta property="og:image" content="https://madeye.github.io/trans_proxy/icon.png">
@@ -20,7 +20,7 @@
   <meta name="twitter:card" content="summary">
   <meta name="twitter:url" content="https://madeye.github.io/trans_proxy/">
   <meta name="twitter:title" content="trans_proxy — Transparent Proxy for macOS & Linux">
-  <meta name="twitter:description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
+  <meta name="twitter:description" content="A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT or SOCKS5 proxy. Supports SNI extraction, DNS-over-HTTPS, and daemon mode.">
   <meta name="twitter:image" content="https://madeye.github.io/trans_proxy/icon.png">
 
   <!-- Favicon -->
@@ -399,7 +399,7 @@
     <div class="container">
       <h1><code>trans_proxy</code></h1>
       <p class="tagline">
-        A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT proxy.
+        A transparent proxy for macOS and Linux that intercepts TCP traffic via pf/nftables and forwards it through an upstream HTTP CONNECT or SOCKS5 proxy.
       </p>
       <div class="hero-buttons">
         <a href="https://github.com/madeye/trans_proxy/releases/latest" class="btn btn-primary">Download</a>
@@ -494,7 +494,7 @@
           <!-- Upstream Proxy -->
           <g>
             <rect x="500" y="332" width="270" height="46" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-            <text x="635" y="360" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Upstream HTTP CONNECT Proxy</text>
+            <text x="635" y="360" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">Upstream Proxy (HTTP CONNECT / SOCKS5)</text>
           </g>
 
           <!-- Original Destination -->
@@ -832,6 +832,10 @@
           <p>Uses <code>SO_ORIGINAL_DST</code> getsockopt to recover original destinations from nftables redirect rules.</p>
         </div>
         <div class="feature">
+          <h3>SOCKS5 Upstream</h3>
+          <p>Use a SOCKS5 proxy as the upstream via <code>socks5://host:port</code>, with optional username/password auth (RFC 1928/1929).</p>
+        </div>
+        <div class="feature">
           <h3>SNI Extraction</h3>
           <p>Peeks at the TLS ClientHello to extract hostnames, sending proper <code>CONNECT host:port</code> instead of raw IPs. No TLS termination or certificate generation needed.</p>
         </div>
@@ -868,7 +872,7 @@
         <li><strong>Linux</strong>: Kernel 3.7+ with nftables</li>
         <li>Rust 1.70+ and Cargo (for building from source)</li>
         <li>Root privileges (for NAT lookups and port 53 binding)</li>
-        <li>An upstream HTTP CONNECT proxy (e.g., Squid, privoxy, or any CONNECT-capable proxy)</li>
+        <li>An upstream HTTP CONNECT or SOCKS5 proxy (e.g., Squid, Dante, ssh -D, or any CONNECT/SOCKS5-capable proxy)</li>
       </ul>
     </div>
   </section>
@@ -956,7 +960,7 @@
           <tr>
             <td><code>--upstream-proxy</code></td>
             <td><em>required</em></td>
-            <td>Upstream HTTP CONNECT proxy address</td>
+            <td>Upstream proxy: <code>host:port</code> for HTTP CONNECT, <code>socks5://host:port</code> for SOCKS5</td>
           </tr>
           <tr>
             <td><code>--log-level</code></td>

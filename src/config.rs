@@ -4,6 +4,7 @@
 //! Uses [`clap`] derive macros for parsing and help generation.
 
 use clap::Parser;
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 
 /// Upstream DNS target: either a UDP address or a DoH URL.
@@ -41,6 +42,82 @@ impl std::str::FromStr for DnsUpstream {
     }
 }
 
+/// SOCKS5 authentication method.
+#[derive(Debug, Clone)]
+pub enum ProxyAuth {
+    None,
+    UsernamePassword { username: String, password: String },
+}
+
+/// Upstream proxy protocol.
+#[derive(Debug, Clone)]
+pub enum ProxyProtocol {
+    HttpConnect,
+    Socks5(ProxyAuth),
+}
+
+/// Parsed upstream proxy configuration.
+#[derive(Debug, Clone)]
+pub struct UpstreamProxy {
+    pub protocol: ProxyProtocol,
+    pub addr: SocketAddr,
+}
+
+impl fmt::Display for UpstreamProxy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.protocol {
+            ProxyProtocol::HttpConnect => write!(f, "http://{}", self.addr),
+            ProxyProtocol::Socks5(ProxyAuth::None) => write!(f, "socks5://{}", self.addr),
+            ProxyProtocol::Socks5(ProxyAuth::UsernamePassword { username, .. }) => {
+                write!(f, "socks5://{}@{}", username, self.addr)
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for UpstreamProxy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(rest) = s.strip_prefix("socks5://") {
+            // socks5://[user:pass@]host:port
+            let (auth, addr_str) = if let Some(at_pos) = rest.rfind('@') {
+                let userinfo = &rest[..at_pos];
+                let addr_part = &rest[at_pos + 1..];
+                let (user, pass) = userinfo.split_once(':').ok_or_else(|| {
+                    format!("invalid socks5 userinfo '{}': expected user:pass", userinfo)
+                })?;
+                (
+                    ProxyAuth::UsernamePassword {
+                        username: user.to_string(),
+                        password: pass.to_string(),
+                    },
+                    addr_part,
+                )
+            } else {
+                (ProxyAuth::None, rest)
+            };
+            let addr: SocketAddr = addr_str
+                .parse()
+                .map_err(|e| format!("invalid socks5 address '{}': {}", addr_str, e))?;
+            Ok(UpstreamProxy {
+                protocol: ProxyProtocol::Socks5(auth),
+                addr,
+            })
+        } else {
+            // http://host:port or bare host:port
+            let addr_str = s.strip_prefix("http://").unwrap_or(s);
+            let addr: SocketAddr = addr_str
+                .parse()
+                .map_err(|e| format!("invalid proxy address '{}': {}", addr_str, e))?;
+            Ok(UpstreamProxy {
+                protocol: ProxyProtocol::HttpConnect,
+                addr,
+            })
+        }
+    }
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -53,16 +130,17 @@ const DEFAULT_INTERFACE: &str = "eth0";
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "trans_proxy",
-    about = "Transparent proxy with upstream HTTP CONNECT support"
+    about = "Transparent proxy with upstream HTTP CONNECT and SOCKS5 support"
 )]
 pub struct Config {
     /// Address to listen on
     #[arg(long, default_value = "0.0.0.0:8443")]
     pub listen_addr: SocketAddr,
 
-    /// Upstream HTTP CONNECT proxy address (host:port)
+    /// Upstream proxy: host:port or http://host:port for HTTP CONNECT,
+    /// socks5://host:port or socks5://user:pass@host:port for SOCKS5
     #[arg(long)]
-    pub upstream_proxy: SocketAddr,
+    pub upstream_proxy: UpstreamProxy,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value_t = default_log_level())]
@@ -173,6 +251,58 @@ mod tests {
 
         let https: DnsUpstream = "https://1.1.1.1/dns-query".parse().unwrap();
         assert_eq!(format!("{}", https), "https://1.1.1.1/dns-query");
+    }
+
+    #[test]
+    fn test_upstream_proxy_parse_bare_addr() {
+        let proxy: UpstreamProxy = "127.0.0.1:1082".parse().unwrap();
+        assert!(matches!(proxy.protocol, ProxyProtocol::HttpConnect));
+        assert_eq!(proxy.addr.to_string(), "127.0.0.1:1082");
+    }
+
+    #[test]
+    fn test_upstream_proxy_parse_http_scheme() {
+        let proxy: UpstreamProxy = "http://127.0.0.1:1082".parse().unwrap();
+        assert!(matches!(proxy.protocol, ProxyProtocol::HttpConnect));
+        assert_eq!(proxy.addr.to_string(), "127.0.0.1:1082");
+    }
+
+    #[test]
+    fn test_upstream_proxy_parse_socks5() {
+        let proxy: UpstreamProxy = "socks5://127.0.0.1:1080".parse().unwrap();
+        assert!(matches!(proxy.protocol, ProxyProtocol::Socks5(ProxyAuth::None)));
+        assert_eq!(proxy.addr.to_string(), "127.0.0.1:1080");
+    }
+
+    #[test]
+    fn test_upstream_proxy_parse_socks5_auth() {
+        let proxy: UpstreamProxy = "socks5://myuser:mypass@127.0.0.1:1080".parse().unwrap();
+        match &proxy.protocol {
+            ProxyProtocol::Socks5(ProxyAuth::UsernamePassword { username, password }) => {
+                assert_eq!(username, "myuser");
+                assert_eq!(password, "mypass");
+            }
+            _ => panic!("expected Socks5 with UsernamePassword auth"),
+        }
+        assert_eq!(proxy.addr.to_string(), "127.0.0.1:1080");
+    }
+
+    #[test]
+    fn test_upstream_proxy_parse_invalid() {
+        let result: Result<UpstreamProxy, _> = "not-valid".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_upstream_proxy_display() {
+        let http: UpstreamProxy = "127.0.0.1:1082".parse().unwrap();
+        assert_eq!(format!("{}", http), "http://127.0.0.1:1082");
+
+        let socks: UpstreamProxy = "socks5://127.0.0.1:1080".parse().unwrap();
+        assert_eq!(format!("{}", socks), "socks5://127.0.0.1:1080");
+
+        let socks_auth: UpstreamProxy = "socks5://user:pass@127.0.0.1:1080".parse().unwrap();
+        assert_eq!(format!("{}", socks_auth), "socks5://user@127.0.0.1:1080");
     }
 
     #[test]

@@ -40,7 +40,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::config::DnsUpstream;
+use crate::config::{DnsUpstream, ProxyAuth, ProxyProtocol, UpstreamProxy};
 
 const MAX_DNS_PACKET: usize = 1500;
 const MAX_CACHE_ENTRIES: usize = 10_000;
@@ -237,7 +237,7 @@ pub async fn run(
     listen_addr: SocketAddr,
     upstream: DnsUpstream,
     table: DnsTable,
-    upstream_proxy: SocketAddr,
+    upstream_proxy: &UpstreamProxy,
 ) -> Result<()> {
     match upstream {
         DnsUpstream::Udp(addr) => run_udp(listen_addr, addr, table).await,
@@ -388,7 +388,7 @@ async fn run_doh(
     listen_addr: SocketAddr,
     doh_url: String,
     table: DnsTable,
-    upstream_proxy: SocketAddr,
+    upstream_proxy: &UpstreamProxy,
 ) -> Result<()> {
     let socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -401,7 +401,15 @@ async fn run_doh(
     );
 
     // Build an HTTP/2-capable client that routes through the upstream proxy
-    let proxy_url = format!("http://{}", upstream_proxy);
+    let proxy_url = match &upstream_proxy.protocol {
+        ProxyProtocol::HttpConnect => format!("http://{}", upstream_proxy.addr),
+        ProxyProtocol::Socks5(ProxyAuth::None) => {
+            format!("socks5://{}", upstream_proxy.addr)
+        }
+        ProxyProtocol::Socks5(ProxyAuth::UsernamePassword { username, password }) => {
+            format!("socks5://{}:{}@{}", username, password, upstream_proxy.addr)
+        }
+    };
     let proxy = reqwest::Proxy::all(&proxy_url).context("Invalid upstream proxy URL for DoH")?;
     let client = reqwest::Client::builder()
         .proxy(proxy)

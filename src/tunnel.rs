@@ -1,20 +1,19 @@
-//! HTTP CONNECT tunnel establishment and relay.
+//! Upstream proxy tunnel establishment and relay.
 //!
-//! Opens a TCP connection to the upstream proxy, performs an HTTP CONNECT
-//! handshake to the original destination, and returns the connected stream
-//! for bidirectional relay.
+//! Opens a TCP connection to the upstream proxy and performs either an
+//! HTTP CONNECT or SOCKS5 handshake to the original destination, returning
+//! the connected stream for bidirectional relay.
 //!
 //! # Timeouts
 //!
-//! All phases of the CONNECT handshake (connect, send, receive) are subject
+//! All phases of the handshake (connect, send, receive) are subject
 //! to a 10-second timeout to prevent hung connections.
 //!
 //! # Hostname Support
 //!
-//! When a hostname is available (from SNI or DNS lookup), the CONNECT request
-//! uses `CONNECT hostname:port` instead of `CONNECT ip:port`, allowing the
-//! upstream proxy to perform its own DNS resolution and apply domain-based
-//! access policies.
+//! When a hostname is available (from SNI or DNS lookup), the request
+//! uses the hostname instead of the raw IP, allowing the upstream proxy
+//! to perform its own DNS resolution and apply domain-based access policies.
 
 use anyhow::{bail, Context, Result};
 use std::net::SocketAddrV4;
@@ -22,23 +21,41 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 
+use crate::config::{ProxyAuth, ProxyProtocol, UpstreamProxy};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_SIZE: usize = 8192;
 
-/// Establish a CONNECT tunnel through the upstream proxy to the given destination.
-/// Returns the connected TcpStream (with the CONNECT handshake completed).
-/// `hostname`: if Some, use it in the CONNECT request instead of the raw IP.
+/// Establish a tunnel through the upstream proxy to the given destination.
+/// Dispatches to HTTP CONNECT or SOCKS5 based on the proxy protocol.
 pub async fn connect_via_proxy(
-    proxy_addr: std::net::SocketAddr,
+    proxy: &UpstreamProxy,
     dest: SocketAddrV4,
     hostname: Option<&str>,
 ) -> Result<TcpStream> {
-    let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(proxy_addr))
+    let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(proxy.addr))
         .await
         .context("Timeout connecting to upstream proxy")?
         .context("Failed to connect to upstream proxy")?;
 
-    // Send CONNECT request — prefer hostname over raw IP when available
+    match &proxy.protocol {
+        ProxyProtocol::HttpConnect => {
+            handshake_http_connect(&mut stream, dest, hostname).await?;
+        }
+        ProxyProtocol::Socks5(auth) => {
+            handshake_socks5(&mut stream, dest, hostname, auth).await?;
+        }
+    }
+
+    Ok(stream)
+}
+
+/// Perform an HTTP CONNECT handshake on an established TCP stream.
+async fn handshake_http_connect(
+    stream: &mut TcpStream,
+    dest: SocketAddrV4,
+    hostname: Option<&str>,
+) -> Result<()> {
     let host = match hostname {
         Some(h) => h.to_string(),
         None => dest.ip().to_string(),
@@ -74,9 +91,7 @@ pub async fn connect_via_proxy(
             }
             filled += n;
 
-            // Check for end of headers
             if let Some(pos) = find_header_end(&buf[..filled]) {
-                // Parse status line
                 let header_str = std::str::from_utf8(&buf[..pos])
                     .context("Invalid UTF-8 in CONNECT response")?;
                 parse_connect_response(header_str)?;
@@ -87,8 +102,185 @@ pub async fn connect_via_proxy(
     .await
     .context("Timeout waiting for CONNECT response")?;
 
-    response?;
-    Ok(stream)
+    response
+}
+
+/// Perform a SOCKS5 handshake (RFC 1928 / RFC 1929) on an established TCP stream.
+async fn handshake_socks5(
+    stream: &mut TcpStream,
+    dest: SocketAddrV4,
+    hostname: Option<&str>,
+    auth: &ProxyAuth,
+) -> Result<()> {
+    // Step 1: Greeting — advertise supported auth methods
+    let greeting = match auth {
+        ProxyAuth::None => vec![0x05, 0x01, 0x00], // 1 method: no auth
+        ProxyAuth::UsernamePassword { .. } => vec![0x05, 0x02, 0x00, 0x02], // 2 methods: no auth + user/pass
+    };
+
+    timeout(CONNECT_TIMEOUT, stream.write_all(&greeting))
+        .await
+        .context("Timeout sending SOCKS5 greeting")?
+        .context("Failed to send SOCKS5 greeting")?;
+
+    // Read server's method selection (2 bytes: version, method)
+    let mut method_resp = [0u8; 2];
+    timeout(CONNECT_TIMEOUT, stream.read_exact(&mut method_resp))
+        .await
+        .context("Timeout reading SOCKS5 method selection")?
+        .context("Failed to read SOCKS5 method selection")?;
+
+    if method_resp[0] != 0x05 {
+        bail!(
+            "SOCKS5: unexpected version {} in method selection",
+            method_resp[0]
+        );
+    }
+
+    match method_resp[1] {
+        0x00 => {} // No auth required — proceed
+        0x02 => {
+            // Username/password auth (RFC 1929)
+            match auth {
+                ProxyAuth::UsernamePassword { username, password } => {
+                    socks5_username_auth(stream, username, password).await?;
+                }
+                ProxyAuth::None => {
+                    bail!("SOCKS5: server requires username/password auth but none configured");
+                }
+            }
+        }
+        0xFF => bail!("SOCKS5: no acceptable authentication methods"),
+        other => bail!("SOCKS5: unsupported auth method 0x{:02x}", other),
+    }
+
+    // Step 2: CONNECT request
+    let mut req = vec![
+        0x05, // version
+        0x01, // CMD: CONNECT
+        0x00, // reserved
+    ];
+
+    match hostname {
+        Some(h) if h.len() <= 255 => {
+            // ATYP 0x03: domain name
+            req.push(0x03);
+            req.push(h.len() as u8);
+            req.extend_from_slice(h.as_bytes());
+        }
+        _ => {
+            // ATYP 0x01: IPv4
+            req.push(0x01);
+            req.extend_from_slice(&dest.ip().octets());
+        }
+    }
+    req.extend_from_slice(&dest.port().to_be_bytes());
+
+    timeout(CONNECT_TIMEOUT, stream.write_all(&req))
+        .await
+        .context("Timeout sending SOCKS5 CONNECT request")?
+        .context("Failed to send SOCKS5 CONNECT request")?;
+
+    // Read response: at least 4 bytes header, then variable address
+    let mut resp_header = [0u8; 4];
+    timeout(CONNECT_TIMEOUT, stream.read_exact(&mut resp_header))
+        .await
+        .context("Timeout reading SOCKS5 CONNECT response")?
+        .context("Failed to read SOCKS5 CONNECT response")?;
+
+    if resp_header[0] != 0x05 {
+        bail!(
+            "SOCKS5: unexpected version {} in CONNECT response",
+            resp_header[0]
+        );
+    }
+    if resp_header[1] != 0x00 {
+        bail!(
+            "SOCKS5: CONNECT failed with status 0x{:02x} ({})",
+            resp_header[1],
+            socks5_error_message(resp_header[1])
+        );
+    }
+
+    // Consume the bound address (ATYP + addr + port) so the stream is clean
+    match resp_header[3] {
+        0x01 => {
+            // IPv4: 4 bytes addr + 2 bytes port
+            let mut buf = [0u8; 6];
+            timeout(CONNECT_TIMEOUT, stream.read_exact(&mut buf))
+                .await
+                .context("Timeout reading SOCKS5 bound address")?
+                .context("Failed to read SOCKS5 bound address")?;
+        }
+        0x03 => {
+            // Domain: 1 byte len + domain + 2 bytes port
+            let mut len_buf = [0u8; 1];
+            timeout(CONNECT_TIMEOUT, stream.read_exact(&mut len_buf))
+                .await
+                .context("Timeout reading SOCKS5 domain length")?
+                .context("Failed to read SOCKS5 domain length")?;
+            let mut buf = vec![0u8; len_buf[0] as usize + 2];
+            timeout(CONNECT_TIMEOUT, stream.read_exact(&mut buf))
+                .await
+                .context("Timeout reading SOCKS5 bound domain")?
+                .context("Failed to read SOCKS5 bound domain")?;
+        }
+        0x04 => {
+            // IPv6: 16 bytes addr + 2 bytes port
+            let mut buf = [0u8; 18];
+            timeout(CONNECT_TIMEOUT, stream.read_exact(&mut buf))
+                .await
+                .context("Timeout reading SOCKS5 bound IPv6 address")?
+                .context("Failed to read SOCKS5 bound IPv6 address")?;
+        }
+        other => bail!("SOCKS5: unknown address type 0x{:02x} in response", other),
+    }
+
+    Ok(())
+}
+
+/// SOCKS5 username/password sub-negotiation (RFC 1929).
+async fn socks5_username_auth(
+    stream: &mut TcpStream,
+    username: &str,
+    password: &str,
+) -> Result<()> {
+    let mut auth_req = vec![0x01]; // sub-negotiation version
+    auth_req.push(username.len() as u8);
+    auth_req.extend_from_slice(username.as_bytes());
+    auth_req.push(password.len() as u8);
+    auth_req.extend_from_slice(password.as_bytes());
+
+    timeout(CONNECT_TIMEOUT, stream.write_all(&auth_req))
+        .await
+        .context("Timeout sending SOCKS5 auth")?
+        .context("Failed to send SOCKS5 auth")?;
+
+    let mut auth_resp = [0u8; 2];
+    timeout(CONNECT_TIMEOUT, stream.read_exact(&mut auth_resp))
+        .await
+        .context("Timeout reading SOCKS5 auth response")?
+        .context("Failed to read SOCKS5 auth response")?;
+
+    if auth_resp[1] != 0x00 {
+        bail!("SOCKS5: authentication failed (status 0x{:02x})", auth_resp[1]);
+    }
+
+    Ok(())
+}
+
+fn socks5_error_message(code: u8) -> &'static str {
+    match code {
+        0x01 => "general SOCKS server failure",
+        0x02 => "connection not allowed by ruleset",
+        0x03 => "network unreachable",
+        0x04 => "host unreachable",
+        0x05 => "connection refused",
+        0x06 => "TTL expired",
+        0x07 => "command not supported",
+        0x08 => "address type not supported",
+        _ => "unknown error",
+    }
 }
 
 fn find_header_end(data: &[u8]) -> Option<usize> {
@@ -99,7 +291,6 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 
 fn parse_connect_response(header: &str) -> Result<()> {
     let status_line = header.lines().next().context("Empty CONNECT response")?;
-    // Expect "HTTP/1.x 200 ..."
     let parts: Vec<&str> = status_line.splitn(3, ' ').collect();
     if parts.len() < 2 {
         bail!("Malformed CONNECT response: {}", status_line);
@@ -109,4 +300,33 @@ fn parse_connect_response(header: &str) -> Result<()> {
         bail!("CONNECT failed with status {}: {}", code, status_line);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_header_end() {
+        assert_eq!(find_header_end(b"HTTP/1.1 200 OK\r\n\r\n"), Some(19));
+        assert_eq!(find_header_end(b"HTTP/1.1 200 OK\r\n"), None);
+        assert_eq!(find_header_end(b""), None);
+    }
+
+    #[test]
+    fn test_parse_connect_response_ok() {
+        assert!(parse_connect_response("HTTP/1.1 200 Connection established\r\n").is_ok());
+    }
+
+    #[test]
+    fn test_parse_connect_response_error() {
+        assert!(parse_connect_response("HTTP/1.1 403 Forbidden\r\n").is_err());
+    }
+
+    #[test]
+    fn test_socks5_error_messages() {
+        assert_eq!(socks5_error_message(0x01), "general SOCKS server failure");
+        assert_eq!(socks5_error_message(0x05), "connection refused");
+        assert_eq!(socks5_error_message(0xFF), "unknown error");
+    }
 }

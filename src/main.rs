@@ -1,7 +1,7 @@
 //! # trans_proxy
 //!
 //! A transparent proxy that intercepts TCP traffic redirected by the OS
-//! firewall and forwards it through an upstream HTTP CONNECT proxy.
+//! firewall and forwards it through an upstream HTTP CONNECT or SOCKS5 proxy.
 //!
 //! Supports:
 //! - **macOS**: pf `rdr` rules with `DIOCNATLOOK` ioctl for original destination recovery
@@ -13,7 +13,7 @@
 //! [Client devices] ──gateway──> [NAT redirect] ──> [trans_proxy :8443]
 //!                                                       │
 //!                                                       ▼
-//!                                                  [Upstream HTTP CONNECT proxy]
+//!                                                  [Upstream proxy (HTTP CONNECT / SOCKS5)]
 //!                                                       │
 //!                                                       ▼
 //!                                                  [Original destination]
@@ -27,7 +27,7 @@
 //! - [`orig_dest`] — Original destination recovery (pf on macOS, SO_ORIGINAL_DST on Linux)
 //! - [`sni`] — TLS ClientHello SNI extraction
 //! - [`dns`] — DNS forwarder on gateway interface port 53 (UDP and DoH upstream)
-//! - [`tunnel`] — HTTP CONNECT tunnel establishment
+//! - [`tunnel`] — HTTP CONNECT / SOCKS5 tunnel establishment
 //! - [`proxy`] — TCP accept loop and per-connection handler
 //!
 //! ## Usage
@@ -121,9 +121,9 @@ fn main() -> Result<()> {
         if let Some(dns_listen) = config.resolve_dns_listen() {
             let table = dns_table.clone();
             let upstream = config.dns_upstream.clone();
-            let upstream_proxy = config.upstream_proxy;
+            let upstream_proxy = config.upstream_proxy.clone();
             tokio::spawn(async move {
-                if let Err(e) = dns::run(dns_listen, upstream, table, upstream_proxy).await {
+                if let Err(e) = dns::run(dns_listen, upstream, table, &upstream_proxy).await {
                     tracing::error!("DNS forwarder failed: {:#}", e);
                 }
             });

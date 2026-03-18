@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-一个适用于 macOS 和 Linux 的透明代理，拦截由操作系统防火墙重定向的 TCP 流量，并通过上游 HTTP CONNECT 代理进行转发。
+一个适用于 macOS 和 Linux 的透明代理，拦截由操作系统防火墙重定向的 TCP 流量，并通过上游 HTTP CONNECT 或 SOCKS5 代理进行转发。
 
 设计用于在作为局域网中其他设备旁路由（网关）的机器上运行。
 
@@ -10,7 +10,7 @@
 [客户端设备] --网关--> [NAT 重定向] --> [trans_proxy :8443]
                                                       |
                                                       v
-                                                 [上游 HTTP CONNECT 代理]
+                                                 [上游代理 (HTTP CONNECT / SOCKS5)]
                                                       |
                                                       v
                                                  [原始目标地址]
@@ -20,6 +20,7 @@
 
 - **macOS pf 集成** — 使用 `/dev/pf` 上的 `DIOCNATLOOK` ioctl 从 pf 的 NAT 状态表中恢复原始目标地址
 - **Linux nftables 集成** — 使用 `SO_ORIGINAL_DST` getsockopt 从 nftables 重定向中恢复原始目标地址
+- **SOCKS5 上游支持** — 使用 SOCKS5 代理作为上游，支持可选的用户名/密码认证（RFC 1928/1929）。通过 `socks5://host:port` 或 `socks5://user:pass@host:port` 选择
 - **SNI 提取** — 窥探 TLS ClientHello 以提取主机名，发送正确的 `CONNECT host:port` 而非原始 IP
 - **DNS 转发器** — 直接监听网关接口（端口 53）的局域网客户端 DNS 查询，构建 IP→域名查找表。支持 DNS-over-HTTPS (DoH)（HTTP/2 连接池、TTL 缓存、查询合并）和传统 UDP 上游。
 - **基于 Anchor 的 pf 规则**（macOS）/ **nftables 表**（Linux）— 不会覆盖现有防火墙配置
@@ -33,7 +34,7 @@
 - **Linux**：内核 3.7+ 且支持 nftables
 - Rust 1.70+ 和 Cargo（从源码构建时需要）
 - Root 权限（用于 NAT 查找和绑定端口 53）
-- 一个上游 HTTP CONNECT 代理（例如 Squid、mitmproxy 或任何支持 CONNECT 的代理）
+- 一个上游 HTTP CONNECT 或 SOCKS5 代理（例如 Squid、Dante、ssh -D 或任何支持 CONNECT/SOCKS5 的代理）
 
 ## 构建
 
@@ -61,13 +62,19 @@ cargo test
 
 ### macOS
 
-本示例假设你的上游 HTTP 代理运行在 `127.0.0.1:1082`，局域网接口为 `en0`。
+本示例假设你的上游代理运行在 `127.0.0.1:1082`，局域网接口为 `en0`。
 
 ```bash
 # 第 1 步：启动透明代理，并在网关接口上启用 DNS
+# HTTP CONNECT 上游：
 sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
   --dns
+
+# 或使用 SOCKS5 上游：
+# sudo ./target/release/trans_proxy \
+#   --upstream-proxy socks5://127.0.0.1:1080 \
+#   --dns
 
 # 第 2 步：设置 pf 重定向
 sudo scripts/pf_setup.sh en0 8443
@@ -81,7 +88,7 @@ sudo kill $(cat /var/run/trans_proxy.pid)
 
 ### Linux
 
-本示例假设你的上游 HTTP 代理运行在 `127.0.0.1:7890`，局域网接口为 `eth0`。
+本示例假设你的上游代理运行在 `127.0.0.1:7890`，局域网接口为 `eth0`。
 
 ```bash
 # 第 1 步：启动透明代理，并启用 DNS
@@ -145,6 +152,16 @@ sudo ./target/release/trans_proxy \
   --upstream-proxy 127.0.0.1:1082 \
   --dns -d --pid-file /tmp/trans_proxy.pid \
   --log-file /tmp/trans_proxy.log
+
+# 使用 SOCKS5 上游代理
+sudo ./target/release/trans_proxy \
+  --upstream-proxy socks5://127.0.0.1:1080 \
+  --dns
+
+# SOCKS5 用户名/密码认证
+sudo ./target/release/trans_proxy \
+  --upstream-proxy socks5://user:pass@127.0.0.1:1080 \
+  --dns
 ```
 
 ### 命令行选项
@@ -152,7 +169,7 @@ sudo ./target/release/trans_proxy \
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--listen-addr` | `0.0.0.0:8443` | 代理监听的地址和端口 |
-| `--upstream-proxy` | *（必填）* | 上游 HTTP CONNECT 代理地址（`host:port`） |
+| `--upstream-proxy` | *（必填）* | 上游代理：`host:port` 或 `http://host:port` 为 HTTP CONNECT，`socks5://host:port` 或 `socks5://user:pass@host:port` 为 SOCKS5 |
 | `--log-level` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error` |
 | `--dns` | 关闭 | 在网关接口上启用 DNS 转发器（端口 53） |
 | `--interface` | `en0`（macOS）/ `eth0`（Linux） | DNS 自动检测使用的网络接口（与 `--dns` 配合使用） |
@@ -270,7 +287,7 @@ echo "nameserver <gateway_ip>" | sudo tee /etc/resolv.conf
 4. trans_proxy 接受连接
 5. 恢复原始目标地址（macOS 使用 `DIOCNATLOOK`，Linux 使用 `SO_ORIGINAL_DST`）
 6. trans_proxy 窥探 TLS ClientHello 以提取 SNI（`example.com`）
-7. 向上游代理发送 `CONNECT example.com:443 HTTP/1.1`
+7. 向上游代理发送 `CONNECT example.com:443`（HTTP CONNECT 或 SOCKS5）
 8. 在客户端和上游代理之间进行双向数据中继
 
 ### 主机名解析

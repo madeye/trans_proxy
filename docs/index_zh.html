@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>trans_proxy — macOS 和 Linux 透明代理</title>
-  <meta name="description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
+  <meta name="description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 或 SOCKS5 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta name="author" content="Max Lv">
 
   <!-- Open Graph / Facebook -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://madeye.github.io/trans_proxy/">
   <meta property="og:title" content="trans_proxy — macOS 和 Linux 透明代理">
-  <meta property="og:description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
+  <meta property="og:description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 或 SOCKS5 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta property="og:site_name" content="trans_proxy">
 
   <meta property="og:image" content="https://madeye.github.io/trans_proxy/icon.png">
@@ -20,7 +20,7 @@
   <meta name="twitter:card" content="summary">
   <meta name="twitter:url" content="https://madeye.github.io/trans_proxy/">
   <meta name="twitter:title" content="trans_proxy — macOS 和 Linux 透明代理">
-  <meta name="twitter:description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
+  <meta name="twitter:description" content="一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 或 SOCKS5 代理。支持 SNI 提取、DNS-over-HTTPS 和守护进程模式。">
   <meta name="twitter:image" content="https://madeye.github.io/trans_proxy/icon.png">
 
   <!-- Favicon -->
@@ -399,7 +399,7 @@
     <div class="container">
       <h1><code>trans_proxy</code></h1>
       <p class="tagline">
-        一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 代理。
+        一款 macOS 和 Linux 透明代理工具，通过 pf/nftables 拦截 TCP 流量并转发至上游 HTTP CONNECT 或 SOCKS5 代理。
       </p>
       <div class="hero-buttons">
         <a href="https://github.com/madeye/trans_proxy/releases/latest" class="btn btn-primary">下载</a>
@@ -494,7 +494,7 @@
           <!-- Upstream Proxy -->
           <g>
             <rect x="500" y="332" width="270" height="46" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-            <text x="635" y="360" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">上游 HTTP CONNECT 代理</text>
+            <text x="635" y="360" text-anchor="middle" fill="#3fb950" font-family="-apple-system, sans-serif" font-size="13" font-weight="600">上游代理 (HTTP CONNECT / SOCKS5)</text>
           </g>
 
           <!-- Original Destination -->
@@ -832,6 +832,10 @@
           <p>使用 <code>SO_ORIGINAL_DST</code> getsockopt 从 nftables 重定向规则中恢复原始目标地址。</p>
         </div>
         <div class="feature">
+          <h3>SOCKS5 上游支持</h3>
+          <p>通过 <code>socks5://host:port</code> 使用 SOCKS5 代理作为上游，支持可选的用户名/密码认证（RFC 1928/1929）。</p>
+        </div>
+        <div class="feature">
           <h3>SNI 提取</h3>
           <p>窥探 TLS ClientHello 以提取主机名，发送正确的 <code>CONNECT host:port</code> 而非原始 IP。无需 TLS 终止或证书生成。</p>
         </div>
@@ -868,7 +872,7 @@
         <li><strong>Linux</strong>：内核 3.7+ 且支持 nftables</li>
         <li>Rust 1.70+ 和 Cargo（从源码构建时需要）</li>
         <li>Root 权限（用于 NAT 查找和绑定端口 53）</li>
-        <li>一个上游 HTTP CONNECT 代理（例如 Squid、privoxy 或任何支持 CONNECT 的代理）</li>
+        <li>一个上游 HTTP CONNECT 或 SOCKS5 代理（例如 Squid、Dante、ssh -D 或任何支持 CONNECT/SOCKS5 的代理）</li>
       </ul>
     </div>
   </section>
@@ -956,7 +960,7 @@
           <tr>
             <td><code>--upstream-proxy</code></td>
             <td><em>必填</em></td>
-            <td>上游 HTTP CONNECT 代理地址</td>
+            <td>上游代理：<code>host:port</code> 为 HTTP CONNECT，<code>socks5://host:port</code> 为 SOCKS5</td>
           </tr>
           <tr>
             <td><code>--log-level</code></td>
