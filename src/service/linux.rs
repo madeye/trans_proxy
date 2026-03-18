@@ -162,7 +162,7 @@ fn generate_unit(args: &[String]) -> String {
 
     format!(
         r#"[Unit]
-Description=Transparent proxy with upstream HTTP CONNECT support
+Description=Transparent proxy with upstream HTTP CONNECT and SOCKS5 support
 After=network-online.target
 Wants=network-online.target
 

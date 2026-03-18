@@ -17,6 +17,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{install, uninstall};
 
+/// Bail if not running as root (euid != 0).
 pub(crate) fn check_root() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!("This command must be run as root (use sudo)");
@@ -24,10 +25,12 @@ pub(crate) fn check_root() -> Result<()> {
     Ok(())
 }
 
+/// Set the file at `path` to mode 755.
 pub(crate) fn set_executable(path: &str) -> Result<()> {
     run_cmd("chmod", &["755", path])
 }
 
+/// Run a shell command and bail on non-zero exit.
 pub(crate) fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     let status = Command::new(cmd)
         .args(args)

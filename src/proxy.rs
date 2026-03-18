@@ -4,7 +4,7 @@
 //! 1. Recovers the original destination via [`crate::orig_dest`]
 //! 2. Attempts SNI extraction via [`crate::sni`] (port 443)
 //! 3. Falls back to DNS table lookup via [`crate::dns`]
-//! 4. Opens an HTTP CONNECT tunnel via [`crate::tunnel`]
+//! 4. Opens an upstream tunnel (HTTP CONNECT or SOCKS5) via [`crate::tunnel`]
 //! 5. Relays data bidirectionally between client and upstream proxy
 
 use std::net::SocketAddr;
@@ -48,6 +48,8 @@ pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
     }
 }
 
+/// Handle a single inbound connection: recover original destination, resolve
+/// hostname, establish upstream tunnel, and relay data bidirectionally.
 async fn handle_connection(
     mut inbound: TcpStream,
     client_addr: SocketAddr,

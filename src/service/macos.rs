@@ -152,6 +152,7 @@ fn generate_plist(args: &[String]) -> String {
     )
 }
 
+/// Escape special XML characters in a string for plist values.
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

@@ -43,23 +43,52 @@ impl std::str::FromStr for DnsUpstream {
 }
 
 /// SOCKS5 authentication method.
+///
+/// Used with [`ProxyProtocol::Socks5`] to specify how to authenticate
+/// with the upstream SOCKS5 proxy server.
 #[derive(Debug, Clone)]
 pub enum ProxyAuth {
+    /// No authentication (SOCKS5 method `0x00`).
     None,
-    UsernamePassword { username: String, password: String },
+    /// Username/password authentication per [RFC 1929](https://tools.ietf.org/html/rfc1929).
+    UsernamePassword {
+        /// SOCKS5 username (max 255 bytes).
+        username: String,
+        /// SOCKS5 password (max 255 bytes).
+        password: String,
+    },
 }
 
-/// Upstream proxy protocol.
+/// Upstream proxy protocol selection.
+///
+/// Determines which handshake is performed after the TCP connection
+/// to the upstream proxy is established.
 #[derive(Debug, Clone)]
 pub enum ProxyProtocol {
+    /// HTTP CONNECT tunnel ([RFC 7231 &sect;4.3.6](https://tools.ietf.org/html/rfc7231#section-4.3.6)).
     HttpConnect,
+    /// SOCKS5 tunnel ([RFC 1928](https://tools.ietf.org/html/rfc1928)) with the given auth method.
     Socks5(ProxyAuth),
 }
 
 /// Parsed upstream proxy configuration.
+///
+/// Combines a [`ProxyProtocol`] with a socket address. Parsed from the
+/// `--upstream-proxy` CLI flag via the [`FromStr`](std::str::FromStr) impl.
+///
+/// # Accepted formats
+///
+/// | Input | Protocol |
+/// |-------|----------|
+/// | `host:port` | HTTP CONNECT |
+/// | `http://host:port` | HTTP CONNECT |
+/// | `socks5://host:port` | SOCKS5 (no auth) |
+/// | `socks5://user:pass@host:port` | SOCKS5 (username/password) |
 #[derive(Debug, Clone)]
 pub struct UpstreamProxy {
+    /// The proxy protocol and authentication method.
     pub protocol: ProxyProtocol,
+    /// The proxy server's socket address.
     pub addr: SocketAddr,
 }
 

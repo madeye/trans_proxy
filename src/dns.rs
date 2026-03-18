@@ -58,6 +58,7 @@ pub struct DnsTable {
 }
 
 impl DnsTable {
+    /// Create an empty DNS lookup table.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),

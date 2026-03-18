@@ -27,7 +27,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_SIZE: usize = 8192;
 
 /// Establish a tunnel through the upstream proxy to the given destination.
-/// Dispatches to HTTP CONNECT or SOCKS5 based on the proxy protocol.
+///
+/// Connects to `proxy.addr`, then performs either an HTTP CONNECT or SOCKS5
+/// handshake depending on [`proxy.protocol`](crate::config::ProxyProtocol).
+/// Returns the connected [`TcpStream`] with the handshake completed and
+/// all protocol framing consumed — ready for bidirectional relay.
+///
+/// When `hostname` is `Some`, it is sent in the CONNECT/SOCKS5 request
+/// (as a domain name) instead of the raw destination IP, allowing the
+/// upstream proxy to perform its own DNS resolution.
 pub async fn connect_via_proxy(
     proxy: &UpstreamProxy,
     dest: SocketAddrV4,
@@ -105,7 +113,13 @@ async fn handshake_http_connect(
     response
 }
 
-/// Perform a SOCKS5 handshake (RFC 1928 / RFC 1929) on an established TCP stream.
+/// Perform a SOCKS5 handshake ([RFC 1928](https://tools.ietf.org/html/rfc1928) /
+/// [RFC 1929](https://tools.ietf.org/html/rfc1929)) on an established TCP stream.
+///
+/// Steps:
+/// 1. **Greeting** — advertise supported auth methods
+/// 2. **Auth** — username/password sub-negotiation if the server selects method `0x02`
+/// 3. **CONNECT** — request a tunnel to `dest` (using ATYP domain when `hostname` is available)
 async fn handshake_socks5(
     stream: &mut TcpStream,
     dest: SocketAddrV4,
@@ -269,6 +283,7 @@ async fn socks5_username_auth(
     Ok(())
 }
 
+/// Map a SOCKS5 reply status byte to a human-readable error message.
 fn socks5_error_message(code: u8) -> &'static str {
     match code {
         0x01 => "general SOCKS server failure",
@@ -283,12 +298,14 @@ fn socks5_error_message(code: u8) -> &'static str {
     }
 }
 
+/// Find the end of HTTP headers (`\r\n\r\n`) in `data`. Returns the byte offset just past the delimiter.
 fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|p| p + 4)
 }
 
+/// Parse an HTTP CONNECT response status line. Returns `Ok(())` on `200`, errors otherwise.
 fn parse_connect_response(header: &str) -> Result<()> {
     let status_line = header.lines().next().context("Empty CONNECT response")?;
     let parts: Vec<&str> = status_line.splitn(3, ' ').collect();
