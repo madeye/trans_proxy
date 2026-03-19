@@ -178,6 +178,8 @@ sudo ./target/release/trans_proxy \
 | `-d` / `--daemon` | off | Run as a background daemon |
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID file path (used with `--daemon`) |
 | `--log-file` | `/var/log/trans_proxy.log` (daemon) / stderr | Log file path |
+| `--local-traffic` | off | Also intercept traffic originating from the gateway itself (not just forwarded LAN traffic) |
+| `--proxy-user` | `trans_proxy` | System user for loop prevention when `--local-traffic` is enabled |
 | `--install` | off | Install as a system service (launchd on macOS, systemd on Linux) |
 | `--uninstall` | off | Uninstall the system service |
 
@@ -258,6 +260,43 @@ To uninstall:
 ```bash
 sudo trans_proxy --uninstall
 ```
+
+### Local Traffic Interception
+
+By default, trans_proxy only intercepts **forwarded traffic** from LAN clients passing through the gateway. To also intercept traffic originating from the gateway machine itself, use `--local-traffic`:
+
+```bash
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns --local-traffic --install
+```
+
+#### How it works
+
+Loop prevention uses UID-based exclusion: the proxy runs as a dedicated system user, and firewall rules skip traffic from that user.
+
+- **Linux**: Adds an nftables OUTPUT chain with `meta skuid` exclusion
+- **macOS**: Adds `pass out route-to (lo0)` + `rdr on lo0` rules with `user !=` exclusion
+
+#### Creating the system user
+
+The proxy user must exist on the system before using `--local-traffic`.
+
+**Linux:**
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin trans_proxy
+```
+
+**macOS:**
+```bash
+# Find an unused UID (e.g., 499)
+sudo dscl . -create /Users/trans_proxy
+sudo dscl . -create /Users/trans_proxy UserShell /usr/bin/false
+sudo dscl . -create /Users/trans_proxy UniqueID 499
+sudo dscl . -create /Users/trans_proxy PrimaryGroupID 20
+```
+
+To use a different username, pass `--proxy-user <name>`.
 
 ### Client Setup
 

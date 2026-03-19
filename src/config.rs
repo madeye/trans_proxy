@@ -205,6 +205,15 @@ pub struct Config {
     #[arg(long)]
     pub log_file: Option<std::path::PathBuf>,
 
+    /// Intercept locally-originated traffic (OUTPUT chain on Linux, route-to on macOS)
+    #[arg(long)]
+    pub local_traffic: bool,
+
+    /// System user for loop prevention when --local-traffic is enabled.
+    /// Traffic from this user is excluded from interception.
+    #[arg(long, default_value = "trans_proxy")]
+    pub proxy_user: String,
+
     /// Install as a system service (launchd on macOS, systemd on Linux)
     #[arg(long)]
     pub install: bool,
@@ -349,6 +358,31 @@ mod tests {
     fn test_get_interface_ip_nonexistent() {
         let result = get_interface_ip("nonexistent_iface_xyz");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_local_traffic_flags() {
+        let config = Config::parse_from([
+            "trans_proxy",
+            "--upstream-proxy",
+            "127.0.0.1:1082",
+            "--local-traffic",
+            "--proxy-user",
+            "myuser",
+        ]);
+        assert!(config.local_traffic);
+        assert_eq!(config.proxy_user, "myuser");
+    }
+
+    #[test]
+    fn test_local_traffic_defaults() {
+        let config = Config::parse_from([
+            "trans_proxy",
+            "--upstream-proxy",
+            "127.0.0.1:1082",
+        ]);
+        assert!(!config.local_traffic);
+        assert_eq!(config.proxy_user, "trans_proxy");
     }
 }
 

@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use super::{check_root, filter_service_args, run_cmd, set_executable};
+use super::{check_root, extract_arg, filter_service_args, has_flag, run_cmd, set_executable};
 
 const UNIT_PATH: &str = "/etc/systemd/system/trans_proxy.service";
 const INSTALL_BIN: &str = "/usr/local/bin/trans_proxy";
@@ -123,20 +123,6 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
-/// Extract a flag's value from args (supports `--flag value` form).
-fn extract_arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if arg == flag {
-            return iter.next().map(|s| s.as_str());
-        }
-        if let Some(val) = arg.strip_prefix(&format!("{flag}=")) {
-            return Some(val);
-        }
-    }
-    None
-}
-
 /// Build the systemd unit file from the proxy arguments.
 ///
 /// The generated unit runs trans_proxy in foreground mode (no `--daemon`)
@@ -160,6 +146,23 @@ fn generate_unit(args: &[String]) -> String {
         .and_then(|addr| addr.rsplit(':').next())
         .unwrap_or("8443");
 
+    let local_traffic = has_flag(&filtered_args, "--local-traffic");
+    let proxy_user = extract_arg(&filtered_args, "--proxy-user").unwrap_or("trans_proxy");
+
+    // When local traffic is enabled, pass proxy_user as 3rd arg to setup script
+    let setup_cmd = if local_traffic {
+        format!("{SETUP_SCRIPT} {interface} {port} {proxy_user}")
+    } else {
+        format!("{SETUP_SCRIPT} {interface} {port}")
+    };
+
+    // When local traffic is enabled, run as the dedicated user for UID-based exclusion
+    let user_line = if local_traffic {
+        format!("User={proxy_user}\n")
+    } else {
+        String::new()
+    };
+
     format!(
         r#"[Unit]
 Description=Transparent proxy with upstream HTTP CONNECT and SOCKS5 support
@@ -168,7 +171,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre={SETUP_SCRIPT} {interface} {port}
+{user_line}ExecStartPre={setup_cmd}
 ExecStart={exec_start}
 ExecStopPost={TEARDOWN_SCRIPT}
 Restart=always
@@ -285,18 +288,49 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_arg() {
+    fn test_generate_unit_local_traffic() {
         let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--local-traffic".into(),
+            "--proxy-user".into(),
+            "myproxy".into(),
             "--interface".into(),
-            "wlan0".into(),
-            "--listen-addr".into(),
-            "0.0.0.0:9999".into(),
+            "eth0".into(),
         ];
-        assert_eq!(extract_arg(&args, "--interface"), Some("wlan0"));
-        assert_eq!(extract_arg(&args, "--listen-addr"), Some("0.0.0.0:9999"));
-        assert_eq!(extract_arg(&args, "--dns"), None);
+        let unit = generate_unit(&args);
 
-        let args_eq: Vec<String> = vec!["--interface=br0".into()];
-        assert_eq!(extract_arg(&args_eq, "--interface"), Some("br0"));
+        // Should have User= directive
+        assert!(unit.contains("User=myproxy"));
+        // Setup script should have 3 args (interface, port, proxy_user)
+        assert!(unit.contains(
+            "ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443 myproxy"
+        ));
+    }
+
+    #[test]
+    fn test_generate_unit_local_traffic_default_user() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--local-traffic".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        assert!(unit.contains("User=trans_proxy"));
+        assert!(unit.contains("nftables_setup.sh eth0 8443 trans_proxy"));
+    }
+
+    #[test]
+    fn test_generate_unit_without_local_traffic_no_user() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        assert!(!unit.contains("User="));
+        // Setup script should have only 2 args
+        assert!(unit.contains("nftables_setup.sh eth0 8443\n"));
     }
 }

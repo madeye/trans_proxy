@@ -82,6 +82,25 @@ pub(crate) fn filter_service_args(args: &[String]) -> Vec<String> {
     result
 }
 
+/// Extract a flag's value from args (supports `--flag value` and `--flag=value` forms).
+pub(crate) fn extract_arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            return iter.next().map(|s| s.as_str());
+        }
+        if let Some(val) = arg.strip_prefix(&format!("{flag}=")) {
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// Check whether a boolean flag is present in the argument list.
+pub(crate) fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +175,34 @@ mod tests {
         ];
         let filtered = filter_service_args(&args);
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_extract_arg() {
+        let args: Vec<String> = vec![
+            "--interface".into(),
+            "wlan0".into(),
+            "--listen-addr".into(),
+            "0.0.0.0:9999".into(),
+        ];
+        assert_eq!(extract_arg(&args, "--interface"), Some("wlan0"));
+        assert_eq!(extract_arg(&args, "--listen-addr"), Some("0.0.0.0:9999"));
+        assert_eq!(extract_arg(&args, "--dns"), None);
+
+        let args_eq: Vec<String> = vec!["--interface=br0".into()];
+        assert_eq!(extract_arg(&args_eq, "--interface"), Some("br0"));
+    }
+
+    #[test]
+    fn test_has_flag() {
+        let args: Vec<String> = vec![
+            "--local-traffic".into(),
+            "--dns".into(),
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+        ];
+        assert!(has_flag(&args, "--local-traffic"));
+        assert!(has_flag(&args, "--dns"));
+        assert!(!has_flag(&args, "--daemon"));
     }
 }
