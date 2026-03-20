@@ -308,7 +308,10 @@ mod tests {
     #[test]
     fn test_upstream_proxy_parse_socks5() {
         let proxy: UpstreamProxy = "socks5://127.0.0.1:1080".parse().unwrap();
-        assert!(matches!(proxy.protocol, ProxyProtocol::Socks5(ProxyAuth::None)));
+        assert!(matches!(
+            proxy.protocol,
+            ProxyProtocol::Socks5(ProxyAuth::None)
+        ));
         assert_eq!(proxy.addr.to_string(), "127.0.0.1:1080");
     }
 
@@ -376,11 +379,7 @@ mod tests {
 
     #[test]
     fn test_local_traffic_defaults() {
-        let config = Config::parse_from([
-            "trans_proxy",
-            "--upstream-proxy",
-            "127.0.0.1:1082",
-        ]);
+        let config = Config::parse_from(["trans_proxy", "--upstream-proxy", "127.0.0.1:1082"]);
         assert!(!config.local_traffic);
         assert_eq!(config.proxy_user, "trans_proxy");
     }

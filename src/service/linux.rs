@@ -323,10 +323,7 @@ mod tests {
 
     #[test]
     fn test_generate_unit_without_local_traffic_no_user() {
-        let args: Vec<String> = vec![
-            "--upstream-proxy".into(),
-            "127.0.0.1:1082".into(),
-        ];
+        let args: Vec<String> = vec!["--upstream-proxy".into(), "127.0.0.1:1082".into()];
         let unit = generate_unit(&args);
 
         assert!(!unit.contains("User="));

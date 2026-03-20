@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running cargo fmt check..."
+if ! cargo fmt -- --check; then
+    echo ""
+    echo "Formatting issues found. Run 'cargo fmt' to fix them."
+    exit 1
+fi

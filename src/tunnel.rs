@@ -277,7 +277,10 @@ async fn socks5_username_auth(
         .context("Failed to read SOCKS5 auth response")?;
 
     if auth_resp[1] != 0x00 {
-        bail!("SOCKS5: authentication failed (status 0x{:02x})", auth_resp[1]);
+        bail!(
+            "SOCKS5: authentication failed (status 0x{:02x})",
+            auth_resp[1]
+        );
     }
 
     Ok(())
