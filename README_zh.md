@@ -178,6 +178,8 @@ sudo ./target/release/trans_proxy \
 | `-d` / `--daemon` | 关闭 | 以后台守护进程方式运行 |
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID 文件路径（与 `--daemon` 配合使用） |
 | `--log-file` | `/var/log/trans_proxy.log`（守护进程）/ stderr | 日志文件路径 |
+| `--local-traffic` | 关闭 | 同时拦截网关本机发出的流量（不仅仅是转发的局域网流量） |
+| `--proxy-user` | `trans_proxy` | 启用 `--local-traffic` 时用于防止回环的系统用户 |
 | `--install` | 关闭 | 安装为系统服务（macOS 使用 launchd，Linux 使用 systemd） |
 | `--uninstall` | 关闭 | 卸载系统服务 |
 
@@ -254,6 +256,43 @@ sudo ./target/release/trans_proxy \
 ```bash
 sudo trans_proxy --uninstall
 ```
+
+### 本机流量拦截
+
+默认情况下，trans_proxy 仅拦截来自局域网客户端经过网关**转发的流量**。如需同时拦截网关本机发出的流量，请使用 `--local-traffic`：
+
+```bash
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns --local-traffic --install
+```
+
+#### 工作原理
+
+通过基于 UID 的排除实现回环防护：代理以专用系统用户身份运行，防火墙规则跳过该用户的流量。
+
+- **Linux**：添加 nftables OUTPUT 链，使用 `meta skuid` 排除
+- **macOS**：添加 `pass out route-to (lo0)` + `rdr on lo0` 规则，使用 `user !=` 排除
+
+#### 创建系统用户
+
+使用 `--local-traffic` 前，代理用户必须已存在于系统中。
+
+**Linux：**
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin trans_proxy
+```
+
+**macOS：**
+```bash
+# 找一个未使用的 UID（例如 499）
+sudo dscl . -create /Users/trans_proxy
+sudo dscl . -create /Users/trans_proxy UserShell /usr/bin/false
+sudo dscl . -create /Users/trans_proxy UniqueID 499
+sudo dscl . -create /Users/trans_proxy PrimaryGroupID 20
+```
+
+如需使用其他用户名，请传递 `--proxy-user <name>`。
 
 ### 客户端设置
 
