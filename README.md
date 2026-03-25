@@ -162,6 +162,11 @@ sudo ./target/release/trans_proxy \
 sudo ./target/release/trans_proxy \
   --upstream-proxy socks5://user:pass@127.0.0.1:1080 \
   --dns
+
+# Redirect only specific ports (default: all TCP)
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns --ports 22,80,443
 ```
 
 ### CLI Options
@@ -180,6 +185,7 @@ sudo ./target/release/trans_proxy \
 | `--log-file` | `/var/log/trans_proxy.log` (daemon) / stderr | Log file path |
 | `--local-traffic` | off | Also intercept traffic originating from the gateway itself (not just forwarded LAN traffic) |
 | `--proxy-user` | `trans_proxy` | System user for loop prevention when `--local-traffic` is enabled |
+| `--ports` | *(all TCP)* | Comma-separated list of TCP ports to redirect (e.g., `22,80,443`). When omitted, all TCP traffic is redirected |
 | `--install` | off | Install as a system service (launchd on macOS, systemd on Linux) |
 | `--uninstall` | off | Uninstall the system service |
 
@@ -190,8 +196,9 @@ sudo ./target/release/trans_proxy \
 The included scripts manage pf rules via an anchor (won't interfere with existing firewall rules).
 
 ```bash
-sudo scripts/pf_setup.sh <interface> [proxy_port]
-sudo scripts/pf_setup.sh en0 8443
+sudo scripts/pf_setup.sh <interface> [proxy_port] [proxy_user] [ports]
+sudo scripts/pf_setup.sh en0 8443                    # all TCP
+sudo scripts/pf_setup.sh en0 8443 "" 80,443           # only ports 80,443
 
 # Tear down
 sudo scripts/pf_teardown.sh
@@ -202,8 +209,9 @@ sudo scripts/pf_teardown.sh
 The included scripts create a dedicated nftables table for trans_proxy.
 
 ```bash
-sudo scripts/nftables_setup.sh <interface> [proxy_port]
-sudo scripts/nftables_setup.sh eth0 8443
+sudo scripts/nftables_setup.sh <interface> [proxy_port] [proxy_user] [ports]
+sudo scripts/nftables_setup.sh eth0 8443                    # all TCP
+sudo scripts/nftables_setup.sh eth0 8443 "" 80,443           # only ports 80,443
 
 # Tear down
 sudo scripts/nftables_teardown.sh

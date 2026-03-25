@@ -162,6 +162,11 @@ sudo ./target/release/trans_proxy \
 sudo ./target/release/trans_proxy \
   --upstream-proxy socks5://user:pass@127.0.0.1:1080 \
   --dns
+
+# 仅重定向指定端口（默认：所有 TCP）
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns --ports 22,80,443
 ```
 
 ### 命令行选项
@@ -180,6 +185,7 @@ sudo ./target/release/trans_proxy \
 | `--log-file` | `/var/log/trans_proxy.log`（守护进程）/ stderr | 日志文件路径 |
 | `--local-traffic` | 关闭 | 同时拦截网关本机发出的流量（不仅仅是转发的局域网流量） |
 | `--proxy-user` | `trans_proxy` | 启用 `--local-traffic` 时用于防止回环的系统用户 |
+| `--ports` | *（所有 TCP）* | 要重定向的 TCP 端口列表，逗号分隔（例如 `22,80,443`）。未指定时重定向所有 TCP 流量 |
 | `--install` | 关闭 | 安装为系统服务（macOS 使用 launchd，Linux 使用 systemd） |
 | `--uninstall` | 关闭 | 卸载系统服务 |
 
@@ -188,8 +194,9 @@ sudo ./target/release/trans_proxy \
 #### macOS (pf)
 
 ```bash
-sudo scripts/pf_setup.sh <interface> [proxy_port]
-sudo scripts/pf_setup.sh en0 8443
+sudo scripts/pf_setup.sh <interface> [proxy_port] [proxy_user] [ports]
+sudo scripts/pf_setup.sh en0 8443                    # 所有 TCP
+sudo scripts/pf_setup.sh en0 8443 "" 80,443           # 仅端口 80,443
 
 # 拆除配置
 sudo scripts/pf_teardown.sh
@@ -198,8 +205,9 @@ sudo scripts/pf_teardown.sh
 #### Linux (nftables)
 
 ```bash
-sudo scripts/nftables_setup.sh <interface> [proxy_port]
-sudo scripts/nftables_setup.sh eth0 8443
+sudo scripts/nftables_setup.sh <interface> [proxy_port] [proxy_user] [ports]
+sudo scripts/nftables_setup.sh eth0 8443                    # 所有 TCP
+sudo scripts/nftables_setup.sh eth0 8443 "" 80,443           # 仅端口 80,443
 
 # 拆除配置
 sudo scripts/nftables_teardown.sh
