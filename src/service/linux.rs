@@ -180,12 +180,13 @@ fn generate_unit(args: &[String]) -> String {
 
     let local_traffic = has_flag(&filtered_args, "--local-traffic");
     let proxy_user = extract_arg(&filtered_args, "--proxy-user").unwrap_or("trans_proxy");
+    let ports = extract_arg(&filtered_args, "--ports");
 
-    // When local traffic is enabled, pass proxy_user as 3rd arg to setup script
-    let setup_cmd = if local_traffic {
-        format!("{SETUP_SCRIPT} {interface} {port} {proxy_user}")
-    } else {
-        format!("{SETUP_SCRIPT} {interface} {port}")
+    let setup_cmd = match (local_traffic, ports) {
+        (true, Some(p)) => format!("{SETUP_SCRIPT} {interface} {port} {proxy_user} {p}"),
+        (true, None) => format!("{SETUP_SCRIPT} {interface} {port} {proxy_user}"),
+        (false, Some(p)) => format!("{SETUP_SCRIPT} {interface} {port} \"\" {p}"),
+        (false, None) => format!("{SETUP_SCRIPT} {interface} {port}"),
     };
 
     // When local traffic is enabled, run as the dedicated user for UID-based exclusion
@@ -361,5 +362,58 @@ mod tests {
         assert!(!unit.contains("User="));
         // Setup script should have only 2 args
         assert!(unit.contains("nftables_setup.sh eth0 8443\n"));
+    }
+
+    #[test]
+    fn test_generate_unit_with_ports() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--ports".into(),
+            "22,80,443".into(),
+            "--interface".into(),
+            "eth0".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" 22,80,443"));
+    }
+
+    #[test]
+    fn test_generate_unit_with_ports_and_local_traffic() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--ports".into(),
+            "22,80,443".into(),
+            "--local-traffic".into(),
+            "--proxy-user".into(),
+            "myproxy".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        assert!(unit.contains("nftables_setup.sh eth0 8443 myproxy 22,80,443"));
+    }
+
+    #[test]
+    fn test_generate_unit_without_ports_all_tcp() {
+        let args: Vec<String> = vec!["--upstream-proxy".into(), "127.0.0.1:1082".into()];
+        let unit = generate_unit(&args);
+
+        // Without ports, no 4th argument — script defaults to all TCP
+        assert!(unit.contains("nftables_setup.sh eth0 8443\n"));
+    }
+
+    #[test]
+    fn test_generate_unit_local_traffic_without_ports() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--local-traffic".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        // local-traffic + no ports: 3 args only, no trailing port list
+        assert!(unit.contains("nftables_setup.sh eth0 8443 trans_proxy\n"));
     }
 }

@@ -12,7 +12,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{install, start, stop, uninstall};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{install, start, stop, uninstall};
