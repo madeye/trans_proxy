@@ -27,7 +27,7 @@ EOF
 
 [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage
 
-IFACE="${1:?Usage: $0 <interface> [proxy_port] [proxy_user]}"
+IFACE="${1:?Usage: $0 <interface> [proxy_port] [proxy_user] [ports]}"
 PORT="${2:-8443}"
 PROXY_USER="${3:-}"
 PORTS="${4:-}"

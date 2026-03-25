@@ -28,11 +28,22 @@ EOF
 
 [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage
 
-IFACE="${1:?Usage: $0 <interface> [proxy_port] [proxy_user]}"
+IFACE="${1:?Usage: $0 <interface> [proxy_port] [proxy_user] [ports]}"
 PROXY_PORT="${2:-8443}"
 PROXY_USER="${3:-}"
 PORTS="${4:-}"
 ANCHOR="trans_proxy"
+
+# Validate individual ports in the comma-separated list
+if [ -n "$PORTS" ]; then
+    IFS=',' read -ra _VALIDATE_PORTS <<< "$PORTS"
+    for _vp in "${_VALIDATE_PORTS[@]}"; do
+        if ! echo "$_vp" | grep -qE '^[0-9]+$' || [ "$_vp" -lt 1 ] || [ "$_vp" -gt 65535 ]; then
+            echo "Error: invalid port '$_vp' in ports list (must be 1-65535)." >&2
+            exit 1
+        fi
+    done
+fi
 
 echo "==> Enabling IP forwarding"
 sudo sysctl -w net.inet.ip.forwarding=1
