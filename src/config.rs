@@ -221,6 +221,14 @@ pub struct Config {
     /// Uninstall the system service
     #[arg(long)]
     pub uninstall: bool,
+
+    /// Start the installed system service
+    #[arg(long)]
+    pub start: bool,
+
+    /// Stop the installed system service
+    #[arg(long)]
+    pub stop: bool,
 }
 
 impl Config {

@@ -75,6 +75,38 @@ pub fn install(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Start the installed trans_proxy systemd service.
+pub fn start() -> Result<()> {
+    check_root()?;
+
+    if !Path::new(UNIT_PATH).exists() {
+        anyhow::bail!(
+            "Service is not installed (no unit at {UNIT_PATH}). Run with --install first."
+        );
+    }
+
+    println!("Starting service...");
+    run_cmd("systemctl", &["start", "trans_proxy"])?;
+    println!("Service started.");
+    Ok(())
+}
+
+/// Stop the installed trans_proxy systemd service.
+pub fn stop() -> Result<()> {
+    check_root()?;
+
+    if !Path::new(UNIT_PATH).exists() {
+        anyhow::bail!(
+            "Service is not installed (no unit at {UNIT_PATH}). Run with --install first."
+        );
+    }
+
+    println!("Stopping service...");
+    run_cmd("systemctl", &["stop", "trans_proxy"])?;
+    println!("Service stopped.");
+    Ok(())
+}
+
 /// Uninstall the trans_proxy systemd service.
 ///
 /// 1. Stops and disables the service

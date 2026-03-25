@@ -63,7 +63,7 @@ use crate::dns::DnsTable;
 fn main() -> Result<()> {
     let config = Config::parse();
 
-    // Handle service install/uninstall before anything else
+    // Handle service commands before anything else
     if config.uninstall {
         return service::uninstall();
     }
@@ -71,6 +71,12 @@ fn main() -> Result<()> {
         // Collect the proxy-relevant args (skip the binary name)
         let args: Vec<String> = std::env::args().skip(1).collect();
         return service::install(&args);
+    }
+    if config.start {
+        return service::start();
+    }
+    if config.stop {
+        return service::stop();
     }
 
     // Daemonize before starting the async runtime

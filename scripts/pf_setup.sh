@@ -1,9 +1,30 @@
 #!/bin/bash
 set -euo pipefail
 
-# Usage: pf_setup.sh <interface> [proxy_port] [proxy_user]
-# Example: pf_setup.sh en0 8443
-# Example: pf_setup.sh en0 8443 trans_proxy   (with local traffic interception)
+usage() {
+    cat <<EOF
+Usage: $0 <interface> [proxy_port] [proxy_user]
+
+Set up macOS pf (packet filter) rules to redirect HTTP/HTTPS traffic
+through trans_proxy.
+
+Arguments:
+  interface    Network interface for redirection (e.g., en0)
+  proxy_port   trans_proxy listen port (default: 8443)
+  proxy_user   When set, also intercept local traffic with UID-based
+               exclusion to prevent loops
+
+Examples:
+  $0 en0              # redirect LAN traffic on en0 to port 8443
+  $0 en0 9000         # redirect LAN traffic on en0 to port 9000
+  $0 en0 8443 _proxy  # also intercept local traffic (exclude user _proxy)
+
+Requires root privileges (uses sudo internally).
+EOF
+    exit 0
+}
+
+[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage
 
 IFACE="${1:?Usage: $0 <interface> [proxy_port] [proxy_user]}"
 PROXY_PORT="${2:-8443}"

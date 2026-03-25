@@ -89,6 +89,34 @@ pub fn install(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Start the installed trans_proxy LaunchDaemon.
+pub fn start() -> Result<()> {
+    check_root()?;
+
+    if !Path::new(PLIST_PATH).exists() {
+        bail!("Service is not installed (no plist at {PLIST_PATH}). Run with --install first.");
+    }
+
+    println!("Starting service...");
+    run_cmd("launchctl", &["load", "-w", PLIST_PATH])?;
+    println!("Service started.");
+    Ok(())
+}
+
+/// Stop the installed trans_proxy LaunchDaemon.
+pub fn stop() -> Result<()> {
+    check_root()?;
+
+    if !Path::new(PLIST_PATH).exists() {
+        bail!("Service is not installed (no plist at {PLIST_PATH}). Run with --install first.");
+    }
+
+    println!("Stopping service...");
+    run_cmd("launchctl", &["unload", PLIST_PATH])?;
+    println!("Service stopped.");
+    Ok(())
+}
+
 /// Uninstall the trans_proxy LaunchDaemon.
 ///
 /// 1. Unloads the service with `launchctl`

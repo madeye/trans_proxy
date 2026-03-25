@@ -10,12 +10,12 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{install, uninstall};
+pub use macos::{install, start, stop, uninstall};
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{install, uninstall};
+pub use linux::{install, start, stop, uninstall};
 
 /// Bail if not running as root (euid != 0).
 pub(crate) fn check_root() -> Result<()> {
@@ -44,7 +44,14 @@ pub(crate) fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
 
 /// Filter out service/daemon-related arguments that shouldn't appear in the service config.
 pub(crate) fn filter_service_args(args: &[String]) -> Vec<String> {
-    let skip_flags = ["--install", "--uninstall", "--daemon", "-d"];
+    let skip_flags = [
+        "--install",
+        "--uninstall",
+        "--start",
+        "--stop",
+        "--daemon",
+        "-d",
+    ];
     let skip_with_value = ["--pid-file", "--log-file"];
 
     let mut result = Vec::new();

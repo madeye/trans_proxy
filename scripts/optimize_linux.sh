@@ -1,12 +1,25 @@
 #!/bin/bash
-# Optimize Linux kernel parameters for trans_proxy.
-#
-# Tunes sysctl and file descriptor limits for high-throughput proxying.
-# Based on https://shadowsocks.org/doc/advanced.html
-#
-# Usage: sudo ./optimize_linux.sh
-
 set -euo pipefail
+
+usage() {
+    cat <<EOF
+Usage: $0
+
+Optimize Linux kernel parameters for trans_proxy.
+
+Tunes sysctl and file descriptor limits for high-throughput proxying.
+Based on https://shadowsocks.org/doc/advanced.html
+
+Settings applied:
+  /etc/sysctl.d/99-trans-proxy.conf     Kernel network tuning
+  /etc/security/limits.d/99-trans-proxy.conf  File descriptor limits
+
+Must be run as root.
+EOF
+    exit 0
+}
+
+[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: must be run as root." >&2

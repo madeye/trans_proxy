@@ -1,13 +1,29 @@
 #!/bin/bash
-# Set up nftables NAT redirect rules for trans_proxy on Linux.
-#
-# Usage: sudo ./nftables_setup.sh <interface> [proxy_port] [proxy_user]
-#   interface:  network interface for prerouting rules (e.g., eth0)
-#   proxy_port: trans_proxy listen port (default: 8443)
-#   proxy_user: when set, also intercept local traffic (OUTPUT chain)
-#               with UID-based exclusion for loop prevention
-
 set -euo pipefail
+
+usage() {
+    cat <<EOF
+Usage: $0 <interface> [proxy_port] [proxy_user]
+
+Set up nftables NAT redirect rules for trans_proxy on Linux.
+
+Arguments:
+  interface    Network interface for prerouting rules (e.g., eth0)
+  proxy_port   trans_proxy listen port (default: 8443)
+  proxy_user   When set, also intercept local traffic (OUTPUT chain)
+               with UID-based exclusion for loop prevention
+
+Examples:
+  sudo $0 eth0              # redirect LAN traffic on eth0 to port 8443
+  sudo $0 eth0 9000         # redirect LAN traffic on eth0 to port 9000
+  sudo $0 eth0 8443 proxy   # also intercept local traffic (exclude user proxy)
+
+Must be run as root.
+EOF
+    exit 0
+}
+
+[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage
 
 IFACE="${1:?Usage: $0 <interface> [proxy_port] [proxy_user]}"
 PORT="${2:-8443}"

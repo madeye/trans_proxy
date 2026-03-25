@@ -521,15 +521,17 @@ async fn run_doh(
         tokio::spawn(async move {
             match doh_query(&client, &doh_url, &packet).await {
                 Ok(response) => {
-                    // Cache the response
-                    cache.put(&query_name_owned, &response);
+                    // Parse A records and populate the table
+                    let resolved_ips = parse_a_records(&response);
+
+                    // Only cache responses that contain A records
+                    if resolved_ips.is_some() {
+                        cache.put(&query_name_owned, &response);
+                    }
 
                     // Broadcast to coalesced waiters
                     let _ = tx.send(response.clone());
                     coalescer.complete(&query_name_owned);
-
-                    // Parse A records and populate the table
-                    let resolved_ips = parse_a_records(&response);
                     if let Some(ref ips) = resolved_ips {
                         for ip in ips {
                             debug!("DNS resolved: {} -> {} (DoH)", query_name_owned, ip);
