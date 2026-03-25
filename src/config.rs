@@ -147,6 +147,45 @@ impl std::str::FromStr for UpstreamProxy {
     }
 }
 
+/// Comma-separated list of TCP ports for firewall redirection.
+///
+/// Used with the `--ports` flag to restrict which ports are redirected.
+/// When not specified, all TCP traffic is redirected.
+#[derive(Debug, Clone)]
+pub struct PortList(pub Vec<u16>);
+
+impl fmt::Display for PortList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s: Vec<String> = self.0.iter().map(|p| p.to_string()).collect();
+        write!(f, "{}", s.join(","))
+    }
+}
+
+impl std::str::FromStr for PortList {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut ports = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for part in s.split(',') {
+            let part = part.trim();
+            let port: u16 = part
+                .parse()
+                .map_err(|_| format!("invalid port '{}': expected 1-65535", part))?;
+            if port == 0 {
+                return Err("port 0 is not valid".to_string());
+            }
+            if seen.insert(port) {
+                ports.push(port);
+            }
+        }
+        if ports.is_empty() {
+            return Err("port list cannot be empty".to_string());
+        }
+        Ok(PortList(ports))
+    }
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -213,6 +252,11 @@ pub struct Config {
     /// Traffic from this user is excluded from interception.
     #[arg(long, default_value = "trans_proxy")]
     pub proxy_user: String,
+
+    /// Comma-separated list of TCP ports to redirect.
+    /// When omitted, all TCP traffic is redirected.
+    #[arg(long)]
+    pub ports: Option<PortList>,
 
     /// Install as a system service (launchd on macOS, systemd on Linux)
     #[arg(long)]
@@ -390,6 +434,73 @@ mod tests {
         let config = Config::parse_from(["trans_proxy", "--upstream-proxy", "127.0.0.1:1082"]);
         assert!(!config.local_traffic);
         assert_eq!(config.proxy_user, "trans_proxy");
+    }
+
+    #[test]
+    fn test_port_list_parse_valid() {
+        let pl: PortList = "22,80,443".parse().unwrap();
+        assert_eq!(pl.0, vec![22, 80, 443]);
+    }
+
+    #[test]
+    fn test_port_list_parse_single() {
+        let pl: PortList = "8080".parse().unwrap();
+        assert_eq!(pl.0, vec![8080]);
+    }
+
+    #[test]
+    fn test_port_list_parse_deduplicates() {
+        let pl: PortList = "80,443,80".parse().unwrap();
+        assert_eq!(pl.0, vec![80, 443]);
+    }
+
+    #[test]
+    fn test_port_list_parse_rejects_zero() {
+        let result: Result<PortList, _> = "0,80".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_port_list_parse_rejects_invalid() {
+        let result: Result<PortList, _> = "abc".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_port_list_parse_rejects_empty() {
+        let result: Result<PortList, _> = "".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_port_list_parse_with_spaces() {
+        let pl: PortList = "22, 80, 443".parse().unwrap();
+        assert_eq!(pl.0, vec![22, 80, 443]);
+    }
+
+    #[test]
+    fn test_port_list_display() {
+        let pl: PortList = "22,80,443".parse().unwrap();
+        assert_eq!(format!("{}", pl), "22,80,443");
+    }
+
+    #[test]
+    fn test_ports_flag() {
+        let config = Config::parse_from([
+            "trans_proxy",
+            "--upstream-proxy",
+            "127.0.0.1:1082",
+            "--ports",
+            "22,80,443",
+        ]);
+        let ports = config.ports.unwrap();
+        assert_eq!(ports.0, vec![22, 80, 443]);
+    }
+
+    #[test]
+    fn test_ports_flag_default_none() {
+        let config = Config::parse_from(["trans_proxy", "--upstream-proxy", "127.0.0.1:1082"]);
+        assert!(config.ports.is_none());
     }
 }
 
