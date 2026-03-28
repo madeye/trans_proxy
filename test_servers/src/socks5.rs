@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
+
+use crate::fwmark;
 
 pub struct Socks5Server {
     listener: TcpListener,
@@ -41,7 +43,8 @@ impl Socks5Server {
     }
 }
 
-async fn handle_socks5(mut stream: TcpStream, count: Arc<AtomicU64>) -> Result<()> {
+async fn handle_socks5(mut stream: tokio::net::TcpStream, count: Arc<AtomicU64>) -> Result<()> {
+    let mark = fwmark::fwmark_from_env();
     // Read greeting: version (1) + nmethods (1) + methods (nmethods)
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).await?;
@@ -90,10 +93,8 @@ async fn handle_socks5(mut stream: TcpStream, count: Arc<AtomicU64>) -> Result<(
         other => bail!("unsupported ATYP 0x{other:02x}"),
     };
 
-    // Connect to destination
-    let mut target = TcpStream::connect(dest_addr)
-        .await
-        .context("failed to connect to destination")?;
+    // Connect to destination (with fwmark to avoid nftables redirect loop)
+    let mut target = fwmark::connect_marked(dest_addr, mark).await?;
 
     // Send success reply
     stream

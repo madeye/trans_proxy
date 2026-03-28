@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
+
+use crate::fwmark;
 
 pub struct HttpConnectServer {
     listener: TcpListener,
@@ -38,7 +40,8 @@ impl HttpConnectServer {
     }
 }
 
-async fn handle_connect(mut stream: TcpStream, count: Arc<AtomicU64>) -> Result<()> {
+async fn handle_connect(mut stream: tokio::net::TcpStream, count: Arc<AtomicU64>) -> Result<()> {
+    let mark = fwmark::fwmark_from_env();
     // Read request until \r\n\r\n
     let mut buf = vec![0u8; 8192];
     let mut filled = 0;
@@ -67,10 +70,18 @@ async fn handle_connect(mut stream: TcpStream, count: Arc<AtomicU64>) -> Result<
     }
     let target = parts[1];
 
-    // Connect to destination
-    let mut dest = TcpStream::connect(target)
-        .await
-        .context("failed to connect to destination")?;
+    // Connect to destination (with fwmark to avoid nftables redirect loop)
+    let target_addr: std::net::SocketAddr = target
+        .parse()
+        .or_else(|_| {
+            // Try resolving as host:port
+            use std::net::ToSocketAddrs;
+            target
+                .to_socket_addrs()
+                .map(|mut addrs| addrs.next().unwrap())
+        })
+        .context("invalid target address")?;
+    let mut dest = fwmark::connect_marked(target_addr, mark).await?;
 
     // Send 200 response
     stream

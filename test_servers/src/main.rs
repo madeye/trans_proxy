@@ -1,3 +1,4 @@
+mod fwmark;
 mod http_connect;
 mod http_dest;
 mod socks5;

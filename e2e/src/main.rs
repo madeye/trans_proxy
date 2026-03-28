@@ -78,6 +78,7 @@ fn find_project_root() -> PathBuf {
 fn start_test_servers(root: &Path) -> Result<(ProcessGuard, TestServerPorts)> {
     let bin = root.join("target/release/test_servers");
     let mut child = Command::new(&bin)
+        .env("FWMARK", FWMARK.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
