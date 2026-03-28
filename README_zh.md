@@ -27,6 +27,7 @@
 - **守护进程模式** — 作为后台进程运行，支持 PID 文件和日志文件
 - **系统服务** — macOS 使用 launchd，Linux 使用 systemd。Linux 上通过 ExecStartPre/ExecStopPost 自动管理 nftables NAT 规则
 - **异步 I/O** — 基于 tokio 构建，每个连接独立任务调度
+- **端到端测试** — 完整的端到端测试套件在 Linux 和 macOS 上运行真实的 nftables/pf + 代理流水线
 
 ## 系统要求
 
@@ -184,7 +185,7 @@ sudo ./target/release/trans_proxy \
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID 文件路径（与 `--daemon` 配合使用） |
 | `--log-file` | `/var/log/trans_proxy.log`（守护进程）/ stderr | 日志文件路径 |
 | `--local-traffic` | 关闭 | 同时拦截网关本机发出的流量（不仅仅是转发的局域网流量） |
-| `--proxy-user` | `trans_proxy` | 启用 `--local-traffic` 时用于防止回环的系统用户 |
+| `--fwmark` | `1` | Linux 上用于防止回环的防火墙标记（与 `--local-traffic` 配合使用） |
 | `--ports` | *（所有 TCP）* | 要重定向的 TCP 端口列表，逗号分隔（例如 `22,80,443`）。未指定时重定向所有 TCP 流量 |
 | `--install` | 关闭 | 安装为系统服务（macOS 使用 launchd，Linux 使用 systemd） |
 | `--uninstall` | 关闭 | 卸载系统服务 |
@@ -194,9 +195,10 @@ sudo ./target/release/trans_proxy \
 #### macOS (pf)
 
 ```bash
-sudo scripts/pf_setup.sh <interface> [proxy_port] [proxy_user] [ports]
-sudo scripts/pf_setup.sh en0 8443                    # 所有 TCP
-sudo scripts/pf_setup.sh en0 8443 "" 80,443           # 仅端口 80,443
+sudo scripts/pf_setup.sh <interface> [proxy_port] [upstream_proxy] [ports]
+sudo scripts/pf_setup.sh en0 8443                              # 所有 TCP
+sudo scripts/pf_setup.sh en0 8443 "" 80,443                    # 仅端口 80,443
+sudo scripts/pf_setup.sh en0 8443 127.0.0.1:1082              # 所有 TCP + 本地流量
 
 # 拆除配置
 sudo scripts/pf_teardown.sh
@@ -205,9 +207,10 @@ sudo scripts/pf_teardown.sh
 #### Linux (nftables)
 
 ```bash
-sudo scripts/nftables_setup.sh <interface> [proxy_port] [proxy_user] [ports]
-sudo scripts/nftables_setup.sh eth0 8443                    # 所有 TCP
-sudo scripts/nftables_setup.sh eth0 8443 "" 80,443           # 仅端口 80,443
+sudo scripts/nftables_setup.sh <interface> [proxy_port] [fwmark] [upstream_proxy] [ports]
+sudo scripts/nftables_setup.sh eth0 8443                                  # 所有 TCP
+sudo scripts/nftables_setup.sh eth0 8443 "" "" 80,443                     # 仅端口 80,443
+sudo scripts/nftables_setup.sh eth0 8443 1 127.0.0.1:7890                # 所有 TCP + 本地流量
 
 # 拆除配置
 sudo scripts/nftables_teardown.sh
@@ -277,30 +280,10 @@ sudo ./target/release/trans_proxy \
 
 #### 工作原理
 
-通过基于 UID 的排除实现回环防护：代理以专用系统用户身份运行，防火墙规则跳过该用户的流量。
+回环防护是自动的，无需创建专用系统用户：
 
-- **Linux**：添加 nftables OUTPUT 链，使用 `meta skuid` 排除
-- **macOS**：添加 `pass out route-to (lo0)` + `rdr on lo0` 规则，使用 `user !=` 排除
-
-#### 创建系统用户
-
-使用 `--local-traffic` 前，代理用户必须已存在于系统中。
-
-**Linux：**
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin trans_proxy
-```
-
-**macOS：**
-```bash
-# 找一个未使用的 UID（例如 499）
-sudo dscl . -create /Users/trans_proxy
-sudo dscl . -create /Users/trans_proxy UserShell /usr/bin/false
-sudo dscl . -create /Users/trans_proxy UniqueID 499
-sudo dscl . -create /Users/trans_proxy PrimaryGroupID 20
-```
-
-如需使用其他用户名，请传递 `--proxy-user <name>`。
+- **Linux**：在出站 socket 上设置 `SO_MARK`（fwmark），nftables OUTPUT 链跳过带标记的数据包
+- **macOS**：当上游代理在本地时，设置 `IP_BOUND_IF` 将出站 socket 绑定到 `lo0`，并通过 `pass out quick` pf 规则排除上游代理目标地址
 
 ### 客户端设置
 

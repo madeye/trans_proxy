@@ -27,6 +27,7 @@ Designed to run on a machine acting as a side router (gateway) for other devices
 - **Daemon mode** — Run as a background process with PID file and log file support
 - **Service install** — launchd on macOS, systemd on Linux. On Linux, nftables NAT rules are automatically managed via ExecStartPre/ExecStopPost
 - **Async I/O** — Built on tokio with per-connection task spawning
+- **End-to-end tested** — Full e2e test suite exercises the real nftables/pf + proxy pipeline on both Linux and macOS
 
 ## Requirements
 
@@ -184,7 +185,7 @@ sudo ./target/release/trans_proxy \
 | `--pid-file` | `/var/run/trans_proxy.pid` | PID file path (used with `--daemon`) |
 | `--log-file` | `/var/log/trans_proxy.log` (daemon) / stderr | Log file path |
 | `--local-traffic` | off | Also intercept traffic originating from the gateway itself (not just forwarded LAN traffic) |
-| `--proxy-user` | `trans_proxy` | System user for loop prevention when `--local-traffic` is enabled |
+| `--fwmark` | `1` | Firewall mark for loop prevention on Linux (used with `--local-traffic`) |
 | `--ports` | *(all TCP)* | Comma-separated list of TCP ports to redirect (e.g., `22,80,443`). When omitted, all TCP traffic is redirected |
 | `--install` | off | Install as a system service (launchd on macOS, systemd on Linux) |
 | `--uninstall` | off | Uninstall the system service |
@@ -196,9 +197,10 @@ sudo ./target/release/trans_proxy \
 The included scripts manage pf rules via an anchor (won't interfere with existing firewall rules).
 
 ```bash
-sudo scripts/pf_setup.sh <interface> [proxy_port] [proxy_user] [ports]
-sudo scripts/pf_setup.sh en0 8443                    # all TCP
-sudo scripts/pf_setup.sh en0 8443 "" 80,443           # only ports 80,443
+sudo scripts/pf_setup.sh <interface> [proxy_port] [upstream_proxy] [ports]
+sudo scripts/pf_setup.sh en0 8443                              # all TCP
+sudo scripts/pf_setup.sh en0 8443 "" 80,443                    # only ports 80,443
+sudo scripts/pf_setup.sh en0 8443 127.0.0.1:1082              # all TCP + local traffic
 
 # Tear down
 sudo scripts/pf_teardown.sh
@@ -209,9 +211,10 @@ sudo scripts/pf_teardown.sh
 The included scripts create a dedicated nftables table for trans_proxy.
 
 ```bash
-sudo scripts/nftables_setup.sh <interface> [proxy_port] [proxy_user] [ports]
-sudo scripts/nftables_setup.sh eth0 8443                    # all TCP
-sudo scripts/nftables_setup.sh eth0 8443 "" 80,443           # only ports 80,443
+sudo scripts/nftables_setup.sh <interface> [proxy_port] [fwmark] [upstream_proxy] [ports]
+sudo scripts/nftables_setup.sh eth0 8443                                  # all TCP
+sudo scripts/nftables_setup.sh eth0 8443 "" "" 80,443                     # only ports 80,443
+sudo scripts/nftables_setup.sh eth0 8443 1 127.0.0.1:7890                # all TCP + local traffic
 
 # Tear down
 sudo scripts/nftables_teardown.sh
@@ -281,30 +284,10 @@ sudo ./target/release/trans_proxy \
 
 #### How it works
 
-Loop prevention uses UID-based exclusion: the proxy runs as a dedicated system user, and firewall rules skip traffic from that user.
+Loop prevention is automatic — no dedicated system user required:
 
-- **Linux**: Adds an nftables OUTPUT chain with `meta skuid` exclusion
-- **macOS**: Adds `pass out route-to (lo0)` + `rdr on lo0` rules with `user !=` exclusion
-
-#### Creating the system user
-
-The proxy user must exist on the system before using `--local-traffic`.
-
-**Linux:**
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin trans_proxy
-```
-
-**macOS:**
-```bash
-# Find an unused UID (e.g., 499)
-sudo dscl . -create /Users/trans_proxy
-sudo dscl . -create /Users/trans_proxy UserShell /usr/bin/false
-sudo dscl . -create /Users/trans_proxy UniqueID 499
-sudo dscl . -create /Users/trans_proxy PrimaryGroupID 20
-```
-
-To use a different username, pass `--proxy-user <name>`.
+- **Linux**: Sets `SO_MARK` (fwmark) on outbound sockets; nftables OUTPUT chain skips marked packets
+- **macOS**: Sets `IP_BOUND_IF` to bind outbound sockets to `lo0` when the upstream is on localhost, plus a `pass out quick` pf rule to exclude the upstream proxy destination
 
 ### Client Setup
 

@@ -3,7 +3,7 @@ members = [".", "test_servers", "e2e"]
 
 [package]
 name = "trans_proxy"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Transparent proxy with upstream HTTP CONNECT and SOCKS5 proxy support (macOS pf, Linux nftables)"
 license = "MIT"
