@@ -362,9 +362,7 @@ mod tests {
         ];
         let wrapper = generate_wrapper(&args);
 
-        assert!(wrapper.contains(&format!(
-            "{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082"
-        )));
+        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082")));
     }
 
     #[test]
@@ -393,9 +391,7 @@ mod tests {
         ];
         let wrapper = generate_wrapper(&args);
 
-        assert!(wrapper.contains(&format!(
-            "{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082 80,443"
-        )));
+        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082 80,443")));
     }
 
     #[test]
@@ -424,5 +420,4 @@ mod tests {
         assert!(!wrapper.contains("--pid-file"));
         assert!(wrapper.contains("--upstream-proxy"));
     }
-
 }

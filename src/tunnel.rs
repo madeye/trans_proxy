@@ -362,7 +362,7 @@ fn set_fwmark(socket: &tokio::net::TcpSocket, mark: u32) -> std::io::Result<()> 
 fn bind_to_loopback(socket: &tokio::net::TcpSocket) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     let fd = socket.as_raw_fd();
-    let lo0_index = unsafe { libc::if_nametoindex(b"lo0\0".as_ptr() as *const libc::c_char) };
+    let lo0_index = unsafe { libc::if_nametoindex(c"lo0".as_ptr()) };
     if lo0_index == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
