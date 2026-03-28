@@ -3,23 +3,31 @@ set -euo pipefail
 
 usage() {
     cat <<EOF
-Usage: $0 <interface> [proxy_port] [proxy_user] [ports]
+Usage: $0 <interface> [proxy_port] [upstream_proxy] [ports]
 
 Set up macOS pf (packet filter) rules to redirect TCP traffic
 through trans_proxy.
 
 Arguments:
-  interface    Network interface for redirection (e.g., en0)
-  proxy_port   trans_proxy listen port (default: 8443)
-  proxy_user   When set, also intercept local traffic with UID-based
-               exclusion to prevent loops (pass "" to skip)
-  ports        Comma-separated ports to redirect (default: all TCP)
+  interface       Network interface for redirection (e.g., en0)
+  proxy_port      trans_proxy listen port (default: 8443)
+  upstream_proxy  Upstream proxy address (ip:port) for destination-based
+                  exclusion when intercepting local traffic. Pass "" to skip
+                  (no local traffic interception).
+  ports           Comma-separated ports to redirect (default: all TCP)
+
+Loop prevention: when upstream_proxy is set, the proxy's outbound connections
+are excluded from interception via two mechanisms:
+  1. IP_BOUND_IF (set in the proxy binary) binds outbound sockets to lo0
+     when the upstream is on localhost, keeping them off the physical interface.
+  2. A "pass out quick" pf rule skips traffic destined to the upstream proxy,
+     covering remote upstreams and library connections (e.g., DoH via reqwest).
 
 Examples:
-  $0 en0                        # redirect all TCP on en0 to port 8443
-  $0 en0 8443 "" 80,443         # redirect only ports 80,443
-  $0 en0 8443 _proxy            # all TCP + local traffic (exclude user _proxy)
-  $0 en0 8443 _proxy 22,80,443  # ports 22,80,443 + local traffic
+  $0 en0                                    # redirect all TCP on en0 to port 8443
+  $0 en0 8443 "" 80,443                     # redirect only ports 80,443
+  $0 en0 8443 127.0.0.1:1082               # all TCP + local traffic
+  $0 en0 8443 127.0.0.1:1082 22,80,443     # ports 22,80,443 + local traffic
 
 Requires root privileges (uses sudo internally).
 EOF
@@ -28,9 +36,9 @@ EOF
 
 [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage
 
-IFACE="${1:?Usage: $0 <interface> [proxy_port] [proxy_user] [ports]}"
+IFACE="${1:?Usage: $0 <interface> [proxy_port] [upstream_proxy] [ports]}"
 PROXY_PORT="${2:-8443}"
-PROXY_USER="${3:-}"
+UPSTREAM="${3:-}"
 PORTS="${4:-}"
 ANCHOR="trans_proxy"
 
@@ -43,6 +51,20 @@ if [ -n "$PORTS" ]; then
             exit 1
         fi
     done
+fi
+
+# Validate upstream proxy address
+if [ -n "$UPSTREAM" ]; then
+    UPSTREAM_IP="${UPSTREAM%:*}"
+    UPSTREAM_PORT="${UPSTREAM##*:}"
+    if [ -z "$UPSTREAM_IP" ] || [ -z "$UPSTREAM_PORT" ]; then
+        echo "Error: invalid upstream proxy address '$UPSTREAM' (expected ip:port)." >&2
+        exit 1
+    fi
+    if ! echo "$UPSTREAM_PORT" | grep -qE '^[0-9]+$' || [ "$UPSTREAM_PORT" -lt 1 ] || [ "$UPSTREAM_PORT" -gt 65535 ]; then
+        echo "Error: invalid upstream proxy port '$UPSTREAM_PORT' (must be 1-65535)." >&2
+        exit 1
+    fi
 fi
 
 echo "==> Enabling IP forwarding"
@@ -60,10 +82,11 @@ else
 fi
 
 # Build the anchor rules
-if [ -n "$PROXY_USER" ]; then
+if [ -n "$UPSTREAM" ]; then
     RULES="rdr on ${IFACE} proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
 rdr on lo0 proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
-pass out on ${IFACE} route-to (lo0 127.0.0.1) proto tcp from any to any${PORT_FILTER} user != ${PROXY_USER}"
+pass out quick on ${IFACE} proto tcp from any to ${UPSTREAM_IP} port ${UPSTREAM_PORT}
+pass out on ${IFACE} route-to (lo0 127.0.0.1) proto tcp from any to any${PORT_FILTER}"
 else
     RULES="rdr on ${IFACE} proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}"
 fi
@@ -101,6 +124,9 @@ if [ -n "$PORTS" ]; then
     echo "  Ports:       ${PORTS} -> 127.0.0.1:${PROXY_PORT}"
 else
     echo "  Ports:       all TCP -> 127.0.0.1:${PROXY_PORT}"
+fi
+if [ -n "$UPSTREAM" ]; then
+    echo "  Upstream:    ${UPSTREAM} (excluded from interception)"
 fi
 echo "  DNS:         use --dns flag to listen on ${GATEWAY_IP:-<interface-ip>}:53 directly"
 echo ""

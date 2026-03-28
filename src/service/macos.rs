@@ -166,6 +166,9 @@ pub fn uninstall() -> Result<()> {
 /// The generated plist runs trans_proxy in foreground mode (no `--daemon`)
 /// since launchd manages the process lifecycle. Arguments like `--install`,
 /// `--uninstall`, `--daemon`, `--pid-file`, and `--log-file` are filtered out.
+///
+/// No `UserName` is set — loop prevention uses `IP_BOUND_IF` (binding outbound
+/// sockets to lo0) and destination-based pf exclusion instead of UID filtering.
 fn generate_plist(args: &[String]) -> String {
     let filtered_args = filter_service_args(args);
 
@@ -179,19 +182,6 @@ fn generate_plist(args: &[String]) -> String {
         program_args.push_str("</string>\n");
     }
 
-    let local_traffic = has_flag(&filtered_args, "--local-traffic");
-    let proxy_user = extract_arg(&filtered_args, "--proxy-user").unwrap_or("trans_proxy");
-
-    // When local traffic is enabled, run as the dedicated user for UID-based exclusion
-    let username_section = if local_traffic {
-        format!(
-            "    <key>UserName</key>\n    <string>{}</string>\n",
-            xml_escape(proxy_user)
-        )
-    } else {
-        String::new()
-    };
-
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -199,7 +189,7 @@ fn generate_plist(args: &[String]) -> String {
 <dict>
     <key>Label</key>
     <string>{PLIST_LABEL}</string>
-{username_section}    <key>ProgramArguments</key>
+    <key>ProgramArguments</key>
     <array>
 {program_args}    </array>
     <key>RunAtLoad</key>
@@ -254,22 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_plist_local_traffic() {
-        let args: Vec<String> = vec![
-            "--upstream-proxy".into(),
-            "127.0.0.1:1082".into(),
-            "--local-traffic".into(),
-            "--proxy-user".into(),
-            "myproxy".into(),
-        ];
-        let plist = generate_plist(&args);
-
-        assert!(plist.contains("<key>UserName</key>"));
-        assert!(plist.contains("<string>myproxy</string>"));
-    }
-
-    #[test]
-    fn test_generate_plist_local_traffic_default_user() {
+    fn test_generate_plist_local_traffic_no_username() {
         let args: Vec<String> = vec![
             "--upstream-proxy".into(),
             "127.0.0.1:1082".into(),
@@ -277,8 +252,9 @@ mod tests {
         ];
         let plist = generate_plist(&args);
 
-        assert!(plist.contains("<key>UserName</key>"));
-        assert!(plist.contains("<string>trans_proxy</string>"));
+        // No UserName — loop prevention uses IP_BOUND_IF + destination exclusion
+        assert!(!plist.contains("<key>UserName</key>"));
+        assert!(plist.contains("<string>--local-traffic</string>"));
     }
 
     #[test]
