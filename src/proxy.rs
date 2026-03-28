@@ -102,8 +102,13 @@ async fn handle_connection(
     };
     info!("{} -> {} [connecting]", client_addr, dest_display);
 
+    let fwmark = if config.local_traffic {
+        Some(config.fwmark)
+    } else {
+        None
+    };
     let mut outbound =
-        connect_via_proxy(&config.upstream_proxy, orig_dest, hostname.as_deref()).await?;
+        connect_via_proxy(&config.upstream_proxy, orig_dest, hostname.as_deref(), fwmark).await?;
     debug!("{} -> {} [tunnel established]", client_addr, dest_display);
 
     let (client_bytes, server_bytes) = copy_bidirectional(&mut inbound, &mut outbound).await?;

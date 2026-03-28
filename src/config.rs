@@ -248,10 +248,17 @@ pub struct Config {
     #[arg(long)]
     pub local_traffic: bool,
 
-    /// System user for loop prevention when --local-traffic is enabled.
-    /// Traffic from this user is excluded from interception.
+    /// System user for loop prevention when --local-traffic is enabled (macOS only).
+    /// Traffic from this user is excluded from pf interception.
+    /// On Linux, fwmark-based filtering is used instead (see --fwmark).
     #[arg(long, default_value = "trans_proxy")]
     pub proxy_user: String,
+
+    /// Firewall mark for loop prevention when --local-traffic is enabled (Linux only).
+    /// The proxy sets SO_MARK on outbound sockets; nftables skips marked packets.
+    /// This avoids the need for a dedicated system user on Linux.
+    #[arg(long, default_value_t = 1)]
+    pub fwmark: u32,
 
     /// Comma-separated list of TCP ports to redirect.
     /// When omitted, all TCP traffic is redirected.
@@ -424,9 +431,12 @@ mod tests {
             "--local-traffic",
             "--proxy-user",
             "myuser",
+            "--fwmark",
+            "42",
         ]);
         assert!(config.local_traffic);
         assert_eq!(config.proxy_user, "myuser");
+        assert_eq!(config.fwmark, 42);
     }
 
     #[test]
@@ -434,6 +444,7 @@ mod tests {
         let config = Config::parse_from(["trans_proxy", "--upstream-proxy", "127.0.0.1:1082"]);
         assert!(!config.local_traffic);
         assert_eq!(config.proxy_user, "trans_proxy");
+        assert_eq!(config.fwmark, 1);
     }
 
     #[test]

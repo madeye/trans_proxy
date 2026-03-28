@@ -179,21 +179,22 @@ fn generate_unit(args: &[String]) -> String {
         .unwrap_or("8443");
 
     let local_traffic = has_flag(&filtered_args, "--local-traffic");
-    let proxy_user = extract_arg(&filtered_args, "--proxy-user").unwrap_or("trans_proxy");
+    let fwmark = extract_arg(&filtered_args, "--fwmark").unwrap_or("1");
+    let upstream = extract_arg(&filtered_args, "--upstream-proxy")
+        .map(|s| s.strip_prefix("http://").or(s.strip_prefix("socks5://")).unwrap_or(s))
+        // Strip socks5 userinfo (user:pass@host:port -> host:port)
+        .map(|s| s.rsplit('@').next().unwrap_or(s));
     let ports = extract_arg(&filtered_args, "--ports");
 
-    let setup_cmd = match (local_traffic, ports) {
-        (true, Some(p)) => format!("{SETUP_SCRIPT} {interface} {port} {proxy_user} {p}"),
-        (true, None) => format!("{SETUP_SCRIPT} {interface} {port} {proxy_user}"),
-        (false, Some(p)) => format!("{SETUP_SCRIPT} {interface} {port} \"\" {p}"),
-        (false, None) => format!("{SETUP_SCRIPT} {interface} {port}"),
-    };
-
-    // When local traffic is enabled, run as the dedicated user for UID-based exclusion
-    let user_line = if local_traffic {
-        format!("User={proxy_user}\n")
+    let fwmark_arg = if local_traffic { fwmark } else { "\"\"" };
+    let upstream_arg = if local_traffic {
+        upstream.unwrap_or("\"\"")
     } else {
-        String::new()
+        "\"\""
+    };
+    let setup_cmd = match ports {
+        Some(p) => format!("{SETUP_SCRIPT} {interface} {port} {fwmark_arg} {upstream_arg} {p}"),
+        None => format!("{SETUP_SCRIPT} {interface} {port} {fwmark_arg} {upstream_arg}"),
     };
 
     format!(
@@ -204,7 +205,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-{user_line}ExecStartPre={setup_cmd}
+ExecStartPre={setup_cmd}
 ExecStart={exec_start}
 ExecStopPost={TEARDOWN_SCRIPT}
 Restart=always
@@ -249,6 +250,8 @@ mod tests {
             unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443")
         );
         assert!(unit.contains("ExecStopPost=/usr/local/lib/trans_proxy/nftables_teardown.sh"));
+        // No User= line when local-traffic is not set
+        assert!(!unit.contains("User="));
     }
 
     #[test]
@@ -326,23 +329,23 @@ mod tests {
             "--upstream-proxy".into(),
             "127.0.0.1:1082".into(),
             "--local-traffic".into(),
-            "--proxy-user".into(),
-            "myproxy".into(),
+            "--fwmark".into(),
+            "42".into(),
             "--interface".into(),
             "eth0".into(),
         ];
         let unit = generate_unit(&args);
 
-        // Should have User= directive
-        assert!(unit.contains("User=myproxy"));
-        // Setup script should have 3 args (interface, port, proxy_user)
+        // No User= directive — fwmark-based filtering, no dedicated user needed
+        assert!(!unit.contains("User="));
+        // Setup script should have fwmark and upstream proxy address
         assert!(unit.contains(
-            "ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443 myproxy"
+            "ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443 42 127.0.0.1:1082"
         ));
     }
 
     #[test]
-    fn test_generate_unit_local_traffic_default_user() {
+    fn test_generate_unit_local_traffic_default_fwmark() {
         let args: Vec<String> = vec![
             "--upstream-proxy".into(),
             "127.0.0.1:1082".into(),
@@ -350,18 +353,20 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        assert!(unit.contains("User=trans_proxy"));
-        assert!(unit.contains("nftables_setup.sh eth0 8443 trans_proxy"));
+        // No User= directive
+        assert!(!unit.contains("User="));
+        // Default fwmark=1, upstream proxy extracted
+        assert!(unit.contains("nftables_setup.sh eth0 8443 1 127.0.0.1:1082"));
     }
 
     #[test]
-    fn test_generate_unit_without_local_traffic_no_user() {
+    fn test_generate_unit_without_local_traffic() {
         let args: Vec<String> = vec!["--upstream-proxy".into(), "127.0.0.1:1082".into()];
         let unit = generate_unit(&args);
 
         assert!(!unit.contains("User="));
-        // Setup script should have only 2 args
-        assert!(unit.contains("nftables_setup.sh eth0 8443\n"));
+        // No fwmark or upstream args when local-traffic is not set
+        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" \"\"\n"));
     }
 
     #[test]
@@ -376,7 +381,7 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" 22,80,443"));
+        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" \"\" 22,80,443"));
     }
 
     #[test]
@@ -387,12 +392,12 @@ mod tests {
             "--ports".into(),
             "22,80,443".into(),
             "--local-traffic".into(),
-            "--proxy-user".into(),
-            "myproxy".into(),
+            "--fwmark".into(),
+            "5".into(),
         ];
         let unit = generate_unit(&args);
 
-        assert!(unit.contains("nftables_setup.sh eth0 8443 myproxy 22,80,443"));
+        assert!(unit.contains("nftables_setup.sh eth0 8443 5 127.0.0.1:1082 22,80,443"));
     }
 
     #[test]
@@ -400,8 +405,8 @@ mod tests {
         let args: Vec<String> = vec!["--upstream-proxy".into(), "127.0.0.1:1082".into()];
         let unit = generate_unit(&args);
 
-        // Without ports, no 4th argument — script defaults to all TCP
-        assert!(unit.contains("nftables_setup.sh eth0 8443\n"));
+        // Without ports, no 5th argument — script defaults to all TCP
+        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" \"\"\n"));
     }
 
     #[test]
@@ -413,7 +418,33 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        // local-traffic + no ports: 3 args only, no trailing port list
-        assert!(unit.contains("nftables_setup.sh eth0 8443 trans_proxy\n"));
+        // local-traffic + no ports: fwmark + upstream, no trailing port list
+        assert!(unit.contains("nftables_setup.sh eth0 8443 1 127.0.0.1:1082\n"));
+    }
+
+    #[test]
+    fn test_generate_unit_local_traffic_socks5_upstream() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "socks5://127.0.0.1:1080".into(),
+            "--local-traffic".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        // socks5:// prefix should be stripped, leaving just the address
+        assert!(unit.contains("nftables_setup.sh eth0 8443 1 127.0.0.1:1080\n"));
+    }
+
+    #[test]
+    fn test_generate_unit_local_traffic_socks5_auth_upstream() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "socks5://user:pass@10.0.0.1:1080".into(),
+            "--local-traffic".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        // socks5:// prefix and user:pass@ should be stripped
+        assert!(unit.contains("nftables_setup.sh eth0 8443 1 10.0.0.1:1080\n"));
     }
 }

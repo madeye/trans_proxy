@@ -36,15 +36,35 @@ const MAX_RESPONSE_SIZE: usize = 8192;
 /// When `hostname` is `Some`, it is sent in the CONNECT/SOCKS5 request
 /// (as a domain name) instead of the raw destination IP, allowing the
 /// upstream proxy to perform its own DNS resolution.
+///
+/// When `fwmark` is `Some` (Linux only), sets `SO_MARK` on the outbound
+/// socket before connecting, so nftables can skip the proxy's own traffic
+/// without UID-based filtering.
 pub async fn connect_via_proxy(
     proxy: &UpstreamProxy,
     dest: SocketAddrV4,
     hostname: Option<&str>,
+    fwmark: Option<u32>,
 ) -> Result<TcpStream> {
-    let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(proxy.addr))
-        .await
-        .context("Timeout connecting to upstream proxy")?
-        .context("Failed to connect to upstream proxy")?;
+    let mut stream = timeout(CONNECT_TIMEOUT, async {
+        let socket = if proxy.addr.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
+
+        #[cfg(target_os = "linux")]
+        if let Some(mark) = fwmark {
+            set_fwmark(&socket, mark)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = fwmark;
+
+        socket.connect(proxy.addr).await
+    })
+    .await
+    .context("Timeout connecting to upstream proxy")?
+    .context("Failed to connect to upstream proxy")?;
 
     match &proxy.protocol {
         ProxyProtocol::HttpConnect => {
@@ -299,6 +319,29 @@ fn socks5_error_message(code: u8) -> &'static str {
         0x08 => "address type not supported",
         _ => "unknown error",
     }
+}
+
+/// Set `SO_MARK` on a TCP socket for nftables fwmark-based filtering (Linux only).
+///
+/// This must be called before `connect()` so the SYN packet carries the mark
+/// and the OUTPUT chain can skip it.
+#[cfg(target_os = "linux")]
+fn set_fwmark(socket: &tokio::net::TcpSocket, mark: u32) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_MARK,
+            &mark as *const u32 as *const libc::c_void,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Find the end of HTTP headers (`\r\n\r\n`) in `data`. Returns the byte offset just past the delimiter.
