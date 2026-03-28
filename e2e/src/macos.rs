@@ -26,7 +26,7 @@ const TEST_IP: [u8; 4] = [10, 200, 200, 1];
 const TEST_IP_STR: &str = "10.200.200.1";
 const PF_ANCHOR: &str = "trans_proxy_e2e";
 
-/// Guard that tears down pf anchor and removes lo0 alias on drop.
+/// Guard that tears down pf anchor on drop (lo0 alias managed separately).
 struct PfGuard;
 
 impl Drop for PfGuard {
@@ -34,10 +34,19 @@ impl Drop for PfGuard {
         let _ = Command::new("sudo")
             .args(["pfctl", "-a", PF_ANCHOR, "-F", "all"])
             .output();
+        eprintln!("  Cleaned up pf anchor");
+    }
+}
+
+/// Guard that removes the lo0 alias on drop. Created once for the entire test run.
+struct Lo0AliasGuard;
+
+impl Drop for Lo0AliasGuard {
+    fn drop(&mut self) {
         let _ = Command::new("sudo")
             .args(["ifconfig", "lo0", "-alias", TEST_IP_STR])
             .output();
-        eprintln!("  Cleaned up pf anchor and lo0 alias");
+        eprintln!("  Removed lo0 alias {TEST_IP_STR}");
     }
 }
 
@@ -322,8 +331,9 @@ async fn test_port_selective_redirect(root: &Path, ports: &TestServerPorts) -> R
 }
 
 pub async fn run(root: &Path, ports: &TestServerPorts) -> Result<()> {
-    // Ensure lo0 alias is set up before any tests
+    // Ensure lo0 alias is set up for the entire test run
     setup_lo0_alias()?;
+    let _alias_guard = Lo0AliasGuard;
     eprintln!("  lo0 alias {TEST_IP_STR} configured");
 
     report_results(vec![
