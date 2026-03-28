@@ -248,10 +248,10 @@ pub struct Config {
     #[arg(long)]
     pub local_traffic: bool,
 
-    /// System user for loop prevention when --local-traffic is enabled (macOS only).
-    /// Traffic from this user is excluded from pf interception.
-    /// On Linux, fwmark-based filtering is used instead (see --fwmark).
-    #[arg(long, default_value = "trans_proxy")]
+    /// Deprecated: previously used for UID-based loop prevention.
+    /// Loop prevention now uses fwmark (Linux) and IP_BOUND_IF + destination
+    /// exclusion (macOS) instead. This flag is accepted but ignored.
+    #[arg(long, default_value = "trans_proxy", hide = true)]
     pub proxy_user: String,
 
     /// Firewall mark for loop prevention when --local-traffic is enabled (Linux only).

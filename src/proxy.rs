@@ -102,13 +102,22 @@ async fn handle_connection(
     };
     info!("{} -> {} [connecting]", client_addr, dest_display);
 
+    #[cfg(target_os = "linux")]
     let fwmark = if config.local_traffic {
         Some(config.fwmark)
     } else {
         None
     };
-    let mut outbound =
-        connect_via_proxy(&config.upstream_proxy, orig_dest, hostname.as_deref(), fwmark).await?;
+    let mut outbound = connect_via_proxy(
+        &config.upstream_proxy,
+        orig_dest,
+        hostname.as_deref(),
+        #[cfg(target_os = "linux")]
+        fwmark,
+        #[cfg(target_os = "macos")]
+        config.local_traffic,
+    )
+    .await?;
     debug!("{} -> {} [tunnel established]", client_addr, dest_display);
 
     let (client_bytes, server_bytes) = copy_bidirectional(&mut inbound, &mut outbound).await?;

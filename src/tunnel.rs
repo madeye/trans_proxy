@@ -37,14 +37,17 @@ const MAX_RESPONSE_SIZE: usize = 8192;
 /// (as a domain name) instead of the raw destination IP, allowing the
 /// upstream proxy to perform its own DNS resolution.
 ///
-/// When `fwmark` is `Some` (Linux only), sets `SO_MARK` on the outbound
-/// socket before connecting, so nftables can skip the proxy's own traffic
-/// without UID-based filtering.
+/// When `local_traffic` is enabled, platform-specific socket options are set
+/// to prevent the proxy's own traffic from being intercepted:
+/// - **Linux**: Sets `SO_MARK` (`fwmark`) so nftables can skip marked packets.
+/// - **macOS**: Sets `IP_BOUND_IF` to bind to `lo0` when the upstream proxy is
+///   on localhost, so packets never hit the `pass out on <iface>` pf rule.
 pub async fn connect_via_proxy(
     proxy: &UpstreamProxy,
     dest: SocketAddrV4,
     hostname: Option<&str>,
-    fwmark: Option<u32>,
+    #[cfg(target_os = "linux")] fwmark: Option<u32>,
+    #[cfg(target_os = "macos")] local_traffic: bool,
 ) -> Result<TcpStream> {
     let mut stream = timeout(CONNECT_TIMEOUT, async {
         let socket = if proxy.addr.is_ipv4() {
@@ -57,8 +60,11 @@ pub async fn connect_via_proxy(
         if let Some(mark) = fwmark {
             set_fwmark(&socket, mark)?;
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = fwmark;
+
+        #[cfg(target_os = "macos")]
+        if local_traffic && proxy.addr.ip().is_loopback() {
+            bind_to_loopback(&socket)?;
+        }
 
         socket.connect(proxy.addr).await
     })
@@ -336,6 +342,42 @@ fn set_fwmark(socket: &tokio::net::TcpSocket, mark: u32) -> std::io::Result<()> 
             libc::SO_MARK,
             &mark as *const u32 as *const libc::c_void,
             std::mem::size_of::<u32>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Bind a TCP socket to the loopback interface (`lo0`) via `IP_BOUND_IF` (macOS only).
+///
+/// When the upstream proxy is on localhost, this ensures the proxy's outbound
+/// connections stay on lo0 and never traverse the physical interface where pf's
+/// `pass out on <iface> route-to` rule would intercept them.
+///
+/// pf only applies `rdr on lo0` to traffic *re-routed* by `route-to`, not to
+/// natively-originated loopback traffic, so no redirect loop occurs.
+#[cfg(target_os = "macos")]
+fn bind_to_loopback(socket: &tokio::net::TcpSocket) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let lo0_index = unsafe { libc::if_nametoindex(b"lo0\0".as_ptr() as *const libc::c_char) };
+    if lo0_index == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "lo0 interface not found",
+        ));
+    }
+    // IP_BOUND_IF = 25 on macOS (from <netinet/in.h>)
+    const IP_BOUND_IF: libc::c_int = 25;
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            IP_BOUND_IF,
+            &lo0_index as *const libc::c_uint as *const libc::c_void,
+            std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
         )
     };
     if ret != 0 {
