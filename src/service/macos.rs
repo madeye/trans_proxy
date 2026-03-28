@@ -16,6 +16,7 @@ const LOG_PATH: &str = "/var/log/trans_proxy.log";
 const SCRIPTS_DIR: &str = "/usr/local/lib/trans_proxy";
 const PF_SETUP_SCRIPT: &str = "/usr/local/lib/trans_proxy/pf_setup.sh";
 const PF_TEARDOWN_SCRIPT: &str = "/usr/local/lib/trans_proxy/pf_teardown.sh";
+const WRAPPER_SCRIPT: &str = "/usr/local/lib/trans_proxy/run.sh";
 
 const PF_SETUP_SCRIPT_CONTENT: &str = include_str!("../../scripts/pf_setup.sh");
 const PF_TEARDOWN_SCRIPT_CONTENT: &str = include_str!("../../scripts/pf_teardown.sh");
@@ -51,6 +52,13 @@ pub fn install(args: &[String]) -> Result<()> {
         .with_context(|| format!("Failed to write {PF_TEARDOWN_SCRIPT}"))?;
     set_executable(PF_SETUP_SCRIPT)?;
     set_executable(PF_TEARDOWN_SCRIPT)?;
+
+    // Generate and install the wrapper script (runs pf setup/teardown around trans_proxy)
+    let wrapper = generate_wrapper(args);
+    println!("Installing wrapper script to {WRAPPER_SCRIPT}...");
+    std::fs::write(WRAPPER_SCRIPT, &wrapper)
+        .with_context(|| format!("Failed to write {WRAPPER_SCRIPT}"))?;
+    set_executable(WRAPPER_SCRIPT)?;
 
     // Generate and write the plist
     let plist = generate_plist(args);
@@ -169,19 +177,7 @@ pub fn uninstall() -> Result<()> {
 ///
 /// No `UserName` is set — loop prevention uses `IP_BOUND_IF` (binding outbound
 /// sockets to lo0) and destination-based pf exclusion instead of UID filtering.
-fn generate_plist(args: &[String]) -> String {
-    let filtered_args = filter_service_args(args);
-
-    let mut program_args = String::new();
-    program_args.push_str("        <string>");
-    program_args.push_str(INSTALL_BIN);
-    program_args.push_str("</string>\n");
-    for arg in &filtered_args {
-        program_args.push_str("        <string>");
-        program_args.push_str(&xml_escape(arg));
-        program_args.push_str("</string>\n");
-    }
-
+fn generate_plist(_args: &[String]) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -191,7 +187,8 @@ fn generate_plist(args: &[String]) -> String {
     <string>{PLIST_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-{program_args}    </array>
+        <string>{WRAPPER_SCRIPT}</string>
+    </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -208,13 +205,63 @@ fn generate_plist(args: &[String]) -> String {
     )
 }
 
-/// Escape special XML characters in a string for plist values.
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+/// Build a wrapper shell script that runs pf setup before trans_proxy
+/// and tears down pf rules on exit.
+fn generate_wrapper(args: &[String]) -> String {
+    let filtered_args = filter_service_args(args);
+
+    let exec_args = if filtered_args.is_empty() {
+        INSTALL_BIN.to_string()
+    } else {
+        format!("{} {}", INSTALL_BIN, filtered_args.join(" "))
+    };
+
+    // Extract interface and port for pf setup
+    let interface = extract_arg(&filtered_args, "--interface").unwrap_or("en0");
+    let port = extract_arg(&filtered_args, "--listen-addr")
+        .and_then(|addr| addr.rsplit(':').next())
+        .unwrap_or("8443");
+
+    let local_traffic = has_flag(&filtered_args, "--local-traffic");
+    let upstream = extract_arg(&filtered_args, "--upstream-proxy")
+        .map(|s| {
+            s.strip_prefix("http://")
+                .or(s.strip_prefix("socks5://"))
+                .unwrap_or(s)
+        })
+        // Strip socks5 userinfo (user:pass@host:port -> host:port)
+        .map(|s| s.rsplit('@').next().unwrap_or(s));
+    let ports = extract_arg(&filtered_args, "--ports");
+
+    let setup_cmd = match (local_traffic, ports) {
+        (true, Some(p)) => {
+            let upstream_arg = upstream.unwrap_or("\"\"");
+            format!("{PF_SETUP_SCRIPT} {interface} {port} {upstream_arg} {p}")
+        }
+        (true, None) => {
+            let upstream_arg = upstream.unwrap_or("\"\"");
+            format!("{PF_SETUP_SCRIPT} {interface} {port} {upstream_arg}")
+        }
+        (false, Some(p)) => format!("{PF_SETUP_SCRIPT} {interface} {port} \"\" {p}"),
+        (false, None) => format!("{PF_SETUP_SCRIPT} {interface} {port}"),
+    };
+
+    format!(
+        r#"#!/bin/bash
+# Auto-generated wrapper script for trans_proxy LaunchDaemon.
+# Sets up pf rules before starting, tears down on exit.
+set -euo pipefail
+
+cleanup() {{
+    {PF_TEARDOWN_SCRIPT}
+}}
+trap cleanup EXIT
+
+{setup_cmd}
+
+exec {exec_args}
+"#
+    )
 }
 
 #[cfg(test)]
@@ -233,10 +280,7 @@ mod tests {
         assert!(plist.contains("<key>Label</key>"));
         assert!(plist.contains(PLIST_LABEL));
         assert!(plist.contains("<key>ProgramArguments</key>"));
-        assert!(plist.contains(&format!("<string>{INSTALL_BIN}</string>")));
-        assert!(plist.contains("<string>--upstream-proxy</string>"));
-        assert!(plist.contains("<string>127.0.0.1:1082</string>"));
-        assert!(plist.contains("<string>--dns</string>"));
+        assert!(plist.contains(&format!("<string>{WRAPPER_SCRIPT}</string>")));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
         // Should NOT have UserName when local-traffic is not set
@@ -254,7 +298,8 @@ mod tests {
 
         // No UserName — loop prevention uses IP_BOUND_IF + destination exclusion
         assert!(!plist.contains("<key>UserName</key>"));
-        assert!(plist.contains("<string>--local-traffic</string>"));
+        // Plist uses wrapper script, not individual args
+        assert!(plist.contains(&format!("<string>{WRAPPER_SCRIPT}</string>")));
     }
 
     #[test]
@@ -269,13 +314,115 @@ mod tests {
 
         assert!(!plist.contains("--install"));
         assert!(!plist.contains("--daemon"));
-        assert!(plist.contains("--upstream-proxy"));
     }
 
     #[test]
-    fn test_xml_escape() {
-        assert_eq!(xml_escape("hello"), "hello");
-        assert_eq!(xml_escape("<test>&"), "&lt;test&gt;&amp;");
-        assert_eq!(xml_escape("a\"b'c"), "a&quot;b&apos;c");
+    fn test_generate_wrapper_basic() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--dns".into(),
+            "--interface".into(),
+            "en0".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains("#!/bin/bash"));
+        assert!(wrapper.contains("trap cleanup EXIT"));
+        assert!(wrapper.contains(&format!(
+            "exec {INSTALL_BIN} --upstream-proxy 127.0.0.1:1082 --dns --interface en0"
+        )));
+        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443")));
+        assert!(wrapper.contains(PF_TEARDOWN_SCRIPT));
     }
+
+    #[test]
+    fn test_generate_wrapper_custom_interface_and_port() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--interface".into(),
+            "en1".into(),
+            "--listen-addr".into(),
+            "0.0.0.0:9999".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en1 9999")));
+    }
+
+    #[test]
+    fn test_generate_wrapper_local_traffic() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--local-traffic".into(),
+            "--interface".into(),
+            "en0".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains(&format!(
+            "{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082"
+        )));
+    }
+
+    #[test]
+    fn test_generate_wrapper_with_ports() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--ports".into(),
+            "80,443".into(),
+            "--interface".into(),
+            "en0".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443 \"\" 80,443")));
+    }
+
+    #[test]
+    fn test_generate_wrapper_with_ports_and_local_traffic() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--ports".into(),
+            "80,443".into(),
+            "--local-traffic".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains(&format!(
+            "{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082 80,443"
+        )));
+    }
+
+    #[test]
+    fn test_generate_wrapper_no_args() {
+        let args: Vec<String> = vec![];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains(&format!("exec {INSTALL_BIN}\n")));
+        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443\n")));
+    }
+
+    #[test]
+    fn test_generate_wrapper_filters_service_flags() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--install".into(),
+            "--daemon".into(),
+            "--pid-file".into(),
+            "/tmp/test.pid".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(!wrapper.contains("--install"));
+        assert!(!wrapper.contains("--daemon"));
+        assert!(!wrapper.contains("--pid-file"));
+        assert!(wrapper.contains("--upstream-proxy"));
+    }
+
 }

@@ -216,6 +216,8 @@ Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+ProtectSystem=false
+PrivateTmp=false
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 [Install]
