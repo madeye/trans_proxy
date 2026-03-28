@@ -2,10 +2,14 @@
 //!
 //! For each accepted connection:
 //! 1. Recovers the original destination via [`crate::orig_dest`]
-//! 2. Attempts SNI extraction via [`crate::sni`] (port 443)
-//! 3. Falls back to DNS table lookup via [`crate::dns`]
-//! 4. Opens an upstream tunnel (HTTP CONNECT or SOCKS5) via [`crate::tunnel`]
-//! 5. Relays data bidirectionally between client and upstream proxy
+//! 2. Validates the destination (loop detection, listen-addr check)
+//! 3. Attempts SNI extraction via [`crate::sni`] (port 443)
+//! 4. Falls back to DNS table lookup via [`crate::dns`]
+//! 5. Opens an upstream tunnel (HTTP CONNECT or SOCKS5) via [`crate::tunnel`]
+//! 6. Relays data bidirectionally between client and upstream proxy
+//!
+//! Handles both forwarded LAN traffic and locally-originated traffic
+//! (when `--local-traffic` is enabled).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

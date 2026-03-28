@@ -2,6 +2,12 @@
 //!
 //! All settings are provided via command-line flags — no config files.
 //! Uses [`clap`] derive macros for parsing and help generation.
+//!
+//! Key configuration types:
+//! - [`UpstreamProxy`] — proxy protocol (HTTP CONNECT or SOCKS5) + address
+//! - [`DnsUpstream`] — DNS upstream mode (UDP or DoH)
+//! - [`PortList`] — optional comma-separated TCP port filter
+//! - [`Config`] — top-level CLI struct with all flags
 
 use clap::Parser;
 use std::fmt;

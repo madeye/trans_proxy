@@ -14,6 +14,17 @@
 //! When a hostname is available (from SNI or DNS lookup), the request
 //! uses the hostname instead of the raw IP, allowing the upstream proxy
 //! to perform its own DNS resolution and apply domain-based access policies.
+//!
+//! # Loop Prevention
+//!
+//! When `--local-traffic` is enabled, the proxy's own outbound connections
+//! must be excluded from NAT interception to avoid infinite loops:
+//!
+//! - **Linux**: Sets `SO_MARK` (fwmark) on the TCP socket before connect.
+//!   The nftables OUTPUT chain has a `meta mark` rule that skips marked packets.
+//! - **macOS**: Sets `IP_BOUND_IF` to bind the socket to `lo0` when the upstream
+//!   proxy is on localhost, keeping traffic off the physical interface where pf's
+//!   `route-to` rule would intercept it.
 
 use anyhow::{bail, Context, Result};
 use std::net::SocketAddrV4;
