@@ -181,7 +181,11 @@ fn generate_unit(args: &[String]) -> String {
     let local_traffic = has_flag(&filtered_args, "--local-traffic");
     let fwmark = extract_arg(&filtered_args, "--fwmark").unwrap_or("1");
     let upstream = extract_arg(&filtered_args, "--upstream-proxy")
-        .map(|s| s.strip_prefix("http://").or(s.strip_prefix("socks5://")).unwrap_or(s))
+        .map(|s| {
+            s.strip_prefix("http://")
+                .or(s.strip_prefix("socks5://"))
+                .unwrap_or(s)
+        })
         // Strip socks5 userinfo (user:pass@host:port -> host:port)
         .map(|s| s.rsplit('@').next().unwrap_or(s));
     let ports = extract_arg(&filtered_args, "--ports");
