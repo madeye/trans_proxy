@@ -64,6 +64,23 @@ jobs:
       - name: Run E2E tests
         run: sudo ./target/release/e2e
 
+  e2e-macos:
+    name: E2E Tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --release --workspace
+
+      - name: Run E2E tests
+        run: sudo ./target/release/e2e
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

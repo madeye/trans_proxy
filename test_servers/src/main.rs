@@ -6,10 +6,11 @@ mod socks5;
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct Ports {
+struct ServerInfo {
     socks5_port: u16,
     http_connect_port: u16,
     http_dest_port: u16,
+    http_dest_addr: String,
 }
 
 #[tokio::main]
@@ -20,18 +21,21 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
+
     let socks5 = socks5::Socks5Server::bind().await?;
     let http_connect = http_connect::HttpConnectServer::bind().await?;
-    let http_dest = http_dest::HttpDestServer::bind().await?;
+    let http_dest = http_dest::HttpDestServer::bind(&bind_addr).await?;
 
-    let ports = Ports {
+    let info = ServerInfo {
         socks5_port: socks5.port(),
         http_connect_port: http_connect.port(),
         http_dest_port: http_dest.port(),
+        http_dest_addr: http_dest.listener_addr().ip().to_string(),
     };
 
     // Print JSON port info for the e2e runner to parse
-    println!("{}", serde_json::to_string(&ports)?);
+    println!("{}", serde_json::to_string(&info)?);
 
     // Run all servers concurrently
     tokio::select! {

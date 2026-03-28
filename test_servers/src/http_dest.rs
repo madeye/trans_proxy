@@ -13,13 +13,17 @@ pub struct HttpDestServer {
 }
 
 impl HttpDestServer {
-    pub async fn bind() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+    pub async fn bind(addr: &str) -> Result<Self> {
+        let listener = TcpListener::bind(format!("{addr}:0")).await?;
         Ok(Self { listener })
     }
 
     pub fn port(&self) -> u16 {
         self.listener.local_addr().unwrap().port()
+    }
+
+    pub fn listener_addr(&self) -> std::net::SocketAddr {
+        self.listener.local_addr().unwrap()
     }
 
     pub async fn run(self) -> Result<()> {
