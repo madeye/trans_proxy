@@ -22,10 +22,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --workspace
 
       - name: Test
-        run: cargo test --release
+        run: cargo test --release --workspace
 
   linux:
     name: Linux (build + test)
@@ -39,10 +39,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --workspace
 
       - name: Test
-        run: cargo test --release
+        run: cargo test --release --workspace
+
+  e2e-linux:
+    name: E2E Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: Build workspace
+        run: cargo build --release --workspace
+
+      - name: Run E2E tests
+        run: sudo ./target/release/e2e
 
   clippy:
     name: Clippy
@@ -58,7 +78,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
 
   fmt:
     name: Format
@@ -72,4 +92,4 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check

@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "test_servers", "e2e"]
+
 [package]
 name = "trans_proxy"
 version = "0.7.0"
