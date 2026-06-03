@@ -246,9 +246,16 @@ pub async fn run(
 
 /// Run the DNS forwarder with a traditional UDP upstream.
 async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTable) -> Result<()> {
-    let socket = UdpSocket::bind(listen_addr)
-        .await
-        .context("Failed to bind DNS listener")?;
+    let socket = UdpSocket::bind(listen_addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "Failed to bind DNS listener on {}: port already in use by another process",
+                listen_addr
+            )
+        } else {
+            anyhow::anyhow!("Failed to bind DNS listener on {}: {}", listen_addr, e)
+        }
+    })?;
     info!(
         "DNS forwarder listening on {}, upstream UDP {}",
         listen_addr, upstream_dns
@@ -389,11 +396,16 @@ async fn run_doh(
     table: DnsTable,
     upstream_proxy: &UpstreamProxy,
 ) -> Result<()> {
-    let socket = Arc::new(
-        UdpSocket::bind(listen_addr)
-            .await
-            .context("Failed to bind DNS listener")?,
-    );
+    let socket = Arc::new(UdpSocket::bind(listen_addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "Failed to bind DNS listener on {}: port already in use by another process",
+                listen_addr
+            )
+        } else {
+            anyhow::anyhow!("Failed to bind DNS listener on {}: {}", listen_addr, e)
+        }
+    })?);
     info!(
         "DNS forwarder listening on {}, upstream DoH {}",
         listen_addr, doh_url

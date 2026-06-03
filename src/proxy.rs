@@ -33,7 +33,16 @@ pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
     #[cfg(target_os = "linux")]
     info!("NAT handle ready (SO_ORIGINAL_DST)");
 
-    let listener = TcpListener::bind(config.listen_addr).await?;
+    let listener = TcpListener::bind(config.listen_addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "Failed to listen on {}: port already in use by another process",
+                config.listen_addr
+            )
+        } else {
+            anyhow::anyhow!("Failed to listen on {}: {}", config.listen_addr, e)
+        }
+    })?;
     info!("Listening on {}", config.listen_addr);
 
     loop {
