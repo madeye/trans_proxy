@@ -31,7 +31,7 @@
 //! until evicted or overwritten by a newer response.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -47,14 +47,14 @@ const MAX_CACHE_ENTRIES: usize = 10_000;
 const MIN_TTL: u32 = 30;
 const MAX_TTL: u32 = 3600;
 
-// DNS header flags / record types
 const DNS_TYPE_A: u16 = 1;
+const DNS_TYPE_AAAA: u16 = 28;
 const DNS_CLASS_IN: u16 = 1;
 
-/// Shared IP→domain lookup table.
+/// Shared IP→domain lookup table (supports both IPv4 and IPv6).
 #[derive(Clone)]
 pub struct DnsTable {
-    inner: Arc<RwLock<HashMap<Ipv4Addr, String>>>,
+    inner: Arc<RwLock<HashMap<IpAddr, String>>>,
 }
 
 impl DnsTable {
@@ -66,16 +66,14 @@ impl DnsTable {
     }
 
     /// Look up a domain name for the given IP address.
-    pub fn lookup(&self, ip: &Ipv4Addr) -> Option<String> {
+    pub fn lookup(&self, ip: &IpAddr) -> Option<String> {
         self.inner.read().ok()?.get(ip).cloned()
     }
 
     /// Insert an IP→domain mapping.
-    fn insert(&self, ip: Ipv4Addr, domain: String) {
+    fn insert(&self, ip: IpAddr, domain: String) {
         if let Ok(mut map) = self.inner.write() {
-            // Evict oldest entries if cache is too large
             if map.len() >= MAX_CACHE_ENTRIES {
-                // Simple eviction: clear half the cache
                 let keys: Vec<_> = map.keys().take(MAX_CACHE_ENTRIES / 2).copied().collect();
                 for k in keys {
                     map.remove(&k);
@@ -316,7 +314,7 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
             let query_name = &clients[0].1;
 
             // Parse A records from the response and populate the table
-            let resolved_ips = parse_a_records(packet);
+            let resolved_ips = parse_ip_records(packet);
             if let Some(ref ips) = resolved_ips {
                 for ip in ips {
                     debug!("DNS resolved: {} -> {}", query_name, ip);
@@ -335,7 +333,7 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
                         .map(|ip| ip.to_string())
                         .collect::<Vec<_>>()
                         .join(","))
-                    .unwrap_or_else(|| "no A records".into()),
+                    .unwrap_or_else(|| "no A/AAAA records".into()),
                 tx_id,
                 client_addrs.join(",")
             );
@@ -437,13 +435,14 @@ async fn run_doh(
 
         let query_name = parse_query_name(&packet).unwrap_or_default();
         let tx_id = u16::from_be_bytes([packet[0], packet[1]]);
+        let ckey = cache_key(&query_name, &packet);
 
         debug!("DNS query from {}: {} (DoH)", client_addr, query_name);
 
         // Fast path: serve from cache
-        if let Some(cached) = cache.get(&query_name, tx_id) {
+        if let Some(cached) = cache.get(&ckey, tx_id) {
             // Still populate the DNS table from cached response
-            let resolved_ips = parse_a_records(&cached);
+            let resolved_ips = parse_ip_records(&cached);
             if let Some(ref ips) = resolved_ips {
                 for ip in ips {
                     table.insert(*ip, query_name.clone());
@@ -459,7 +458,7 @@ async fn run_doh(
                         .map(|ip| ip.to_string())
                         .collect::<Vec<_>>()
                         .join(","))
-                    .unwrap_or_else(|| "no A records".into()),
+                    .unwrap_or_else(|| "no A/AAAA records".into()),
                 client_addr
             );
             if let Err(e) = socket.send_to(&cached, client_addr).await {
@@ -471,8 +470,7 @@ async fn run_doh(
             continue;
         }
 
-        // Coalesce: if another task is already querying this domain, wait for its result
-        if let Some(mut rx) = coalescer.try_join(&query_name) {
+        if let Some(mut rx) = coalescer.try_join(&ckey) {
             let socket = Arc::clone(&socket);
             let table = table.clone();
             let query_name = query_name.clone();
@@ -486,7 +484,7 @@ async fn run_doh(
                             resp[0] = id_bytes[0];
                             resp[1] = id_bytes[1];
                         }
-                        let resolved_ips = parse_a_records(&resp);
+                        let resolved_ips = parse_ip_records(&resp);
                         if let Some(ref ips) = resolved_ips {
                             for ip in ips {
                                 table.insert(*ip, query_name.clone());
@@ -507,8 +505,7 @@ async fn run_doh(
             continue;
         }
 
-        // Register this query as in-flight
-        let tx = coalescer.register(&query_name);
+        let tx = coalescer.register(&ckey);
 
         let socket = Arc::clone(&socket);
         let client = client.clone();
@@ -517,21 +514,20 @@ async fn run_doh(
         let cache = Arc::clone(&cache);
         let coalescer = Arc::clone(&coalescer);
         let query_name_owned = query_name.clone();
+        let ckey_owned = ckey.clone();
 
         tokio::spawn(async move {
             match doh_query(&client, &doh_url, &packet).await {
                 Ok(response) => {
                     // Parse A records and populate the table
-                    let resolved_ips = parse_a_records(&response);
+                    let resolved_ips = parse_ip_records(&response);
 
-                    // Only cache responses that contain A records
                     if resolved_ips.is_some() {
-                        cache.put(&query_name_owned, &response);
+                        cache.put(&ckey_owned, &response);
                     }
 
-                    // Broadcast to coalesced waiters
                     let _ = tx.send(response.clone());
-                    coalescer.complete(&query_name_owned);
+                    coalescer.complete(&ckey_owned);
                     if let Some(ref ips) = resolved_ips {
                         for ip in ips {
                             debug!("DNS resolved: {} -> {} (DoH)", query_name_owned, ip);
@@ -549,7 +545,7 @@ async fn run_doh(
                                 .map(|ip| ip.to_string())
                                 .collect::<Vec<_>>()
                                 .join(","))
-                            .unwrap_or_else(|| "no A records".into()),
+                            .unwrap_or_else(|| "no A/AAAA records".into()),
                         client_addr
                     );
 
@@ -559,7 +555,7 @@ async fn run_doh(
                     }
                 }
                 Err(e) => {
-                    coalescer.complete(&query_name_owned);
+                    coalescer.complete(&ckey_owned);
                     warn!("DoH query for {} failed: {:#}", query_name_owned, e);
                 }
             }
@@ -587,6 +583,39 @@ async fn doh_query(client: &reqwest::Client, url: &str, query: &[u8]) -> Result<
         .await
         .context("Failed to read DoH response body")?;
     Ok(bytes.to_vec())
+}
+
+/// Build a cache key from domain name and query type (e.g. "example.com/A" or "example.com/AAAA").
+fn cache_key(name: &str, packet: &[u8]) -> String {
+    let qtype = parse_query_type(packet).unwrap_or(0);
+    format!("{}/{}", name, qtype)
+}
+
+/// Parse the query type (QTYPE) from a DNS packet. Returns the raw u16 value.
+fn parse_query_type(packet: &[u8]) -> Option<u16> {
+    let mut pos = 12;
+    if pos >= packet.len() {
+        return None;
+    }
+    loop {
+        if pos >= packet.len() {
+            return None;
+        }
+        let len = packet[pos] as usize;
+        if len == 0 {
+            pos += 1;
+            break;
+        }
+        if len & 0xC0 == 0xC0 {
+            pos += 2;
+            break;
+        }
+        pos += 1 + len;
+    }
+    if pos + 2 > packet.len() {
+        return None;
+    }
+    Some(u16::from_be_bytes([packet[pos], packet[pos + 1]]))
 }
 
 /// Parse the query name (QNAME) from a DNS packet.
@@ -622,13 +651,12 @@ fn parse_query_name(packet: &[u8]) -> Option<String> {
     }
 }
 
-/// Parse A records from a DNS response packet. Returns the IPv4 addresses found.
-fn parse_a_records(packet: &[u8]) -> Option<Vec<Ipv4Addr>> {
+/// Parse A and AAAA records from a DNS response packet.
+fn parse_ip_records(packet: &[u8]) -> Option<Vec<IpAddr>> {
     if packet.len() < 12 {
         return None;
     }
 
-    // Header: ID(2) + flags(2) + QDCOUNT(2) + ANCOUNT(2) + NSCOUNT(2) + ARCOUNT(2)
     let ancount = u16::from_be_bytes([packet[6], packet[7]]) as usize;
     if ancount == 0 {
         return None;
@@ -636,17 +664,15 @@ fn parse_a_records(packet: &[u8]) -> Option<Vec<Ipv4Addr>> {
 
     let mut pos = 12;
 
-    // Skip question section
     let qdcount = u16::from_be_bytes([packet[4], packet[5]]) as usize;
     for _ in 0..qdcount {
         pos = skip_dns_name(packet, pos)?;
-        pos += 4; // QTYPE(2) + QCLASS(2)
+        pos += 4;
         if pos > packet.len() {
             return None;
         }
     }
 
-    // Parse answer section
     let mut ips = Vec::new();
     for _ in 0..ancount {
         pos = skip_dns_name(packet, pos)?;
@@ -656,7 +682,6 @@ fn parse_a_records(packet: &[u8]) -> Option<Vec<Ipv4Addr>> {
 
         let rtype = u16::from_be_bytes([packet[pos], packet[pos + 1]]);
         let rclass = u16::from_be_bytes([packet[pos + 2], packet[pos + 3]]);
-        // skip TTL (4 bytes)
         let rdlength = u16::from_be_bytes([packet[pos + 8], packet[pos + 9]]) as usize;
         pos += 10;
 
@@ -664,14 +689,20 @@ fn parse_a_records(packet: &[u8]) -> Option<Vec<Ipv4Addr>> {
             break;
         }
 
-        if rtype == DNS_TYPE_A && rclass == DNS_CLASS_IN && rdlength == 4 {
-            let ip = Ipv4Addr::new(
-                packet[pos],
-                packet[pos + 1],
-                packet[pos + 2],
-                packet[pos + 3],
-            );
-            ips.push(ip);
+        if rclass == DNS_CLASS_IN {
+            if rtype == DNS_TYPE_A && rdlength == 4 {
+                let ip = Ipv4Addr::new(
+                    packet[pos],
+                    packet[pos + 1],
+                    packet[pos + 2],
+                    packet[pos + 3],
+                );
+                ips.push(IpAddr::V4(ip));
+            } else if rtype == DNS_TYPE_AAAA && rdlength == 16 {
+                let mut octets = [0u8; 16];
+                octets.copy_from_slice(&packet[pos..pos + 16]);
+                ips.push(IpAddr::V6(Ipv6Addr::from(octets)));
+            }
         }
 
         pos += rdlength;
@@ -706,7 +737,30 @@ fn skip_dns_name(packet: &[u8], mut pos: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
-    /// Build a minimal DNS response with one A record for "example.com" → 93.184.216.34
+    fn build_dns_response_aaaa(domain: &str, ip: Ipv6Addr) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&[0xAB, 0xCD]);
+        pkt.extend_from_slice(&[0x81, 0x80]);
+        pkt.extend_from_slice(&[0x00, 0x01]);
+        pkt.extend_from_slice(&[0x00, 0x01]);
+        pkt.extend_from_slice(&[0x00, 0x00]);
+        pkt.extend_from_slice(&[0x00, 0x00]);
+        for label in domain.split('.') {
+            pkt.push(label.len() as u8);
+            pkt.extend_from_slice(label.as_bytes());
+        }
+        pkt.push(0x00);
+        pkt.extend_from_slice(&DNS_TYPE_AAAA.to_be_bytes());
+        pkt.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+        pkt.extend_from_slice(&[0xC0, 0x0C]);
+        pkt.extend_from_slice(&DNS_TYPE_AAAA.to_be_bytes());
+        pkt.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+        pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);
+        pkt.extend_from_slice(&[0x00, 0x10]); // RDLENGTH = 16
+        pkt.extend_from_slice(&ip.octets());
+        pkt
+    }
+
     fn build_dns_response(domain: &str, ip: Ipv4Addr) -> Vec<u8> {
         let mut pkt = Vec::new();
 
@@ -752,20 +806,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_a_records() {
+    fn test_parse_ip_records_a() {
         let ip = Ipv4Addr::new(93, 184, 216, 34);
         let pkt = build_dns_response("example.com", ip);
-        let ips = parse_a_records(&pkt).unwrap();
-        assert_eq!(ips, vec![ip]);
+        let ips = parse_ip_records(&pkt).unwrap();
+        assert_eq!(ips, vec![IpAddr::V4(ip)]);
     }
 
     #[test]
-    fn test_parse_a_records_no_answer() {
-        // Response with ANCOUNT=0
+    fn test_parse_ip_records_aaaa() {
+        let ip = Ipv6Addr::new(
+            0x2606, 0x2800, 0x21f, 0xcb07, 0x6820, 0x80da, 0xaf6b, 0x8b2c,
+        );
+        let pkt = build_dns_response_aaaa("example.com", ip);
+        let ips = parse_ip_records(&pkt).unwrap();
+        assert_eq!(ips, vec![IpAddr::V6(ip)]);
+    }
+
+    #[test]
+    fn test_parse_ip_records_no_answer() {
         let mut pkt = vec![0u8; 12];
         pkt[2] = 0x81;
         pkt[3] = 0x80;
-        assert_eq!(parse_a_records(&pkt), None);
+        assert_eq!(parse_ip_records(&pkt), None);
     }
 
     /// Build a minimal DNS query for a domain name.
@@ -803,9 +866,8 @@ mod tests {
         // Verify tx_id was rewritten
         assert_eq!(cached[0], 0x12);
         assert_eq!(cached[1], 0x34);
-        // Verify A record is still parseable
-        let ips = parse_a_records(&cached).unwrap();
-        assert_eq!(ips, vec![ip]);
+        let ips = parse_ip_records(&cached).unwrap();
+        assert_eq!(ips, vec![IpAddr::V4(ip)]);
     }
 
     #[test]
@@ -881,7 +943,7 @@ mod tests {
 
         // Verify the DNS table was populated (proves the info!/debug! code paths ran)
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let resolved = table.lookup(&Ipv4Addr::new(93, 184, 216, 34));
+        let resolved = table.lookup(&IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)));
         assert_eq!(resolved, Some("example.com".to_string()));
 
         forwarder.abort();

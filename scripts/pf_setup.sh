@@ -70,9 +70,11 @@ fi
 
 echo "==> Enabling IP forwarding"
 sudo sysctl -w net.inet.ip.forwarding=1
+sudo sysctl -w net.inet6.ip6.forwarding=1
 
-# Get interface IP for SSH bypass
+# Get interface IPs for SSH bypass
 IFACE_IP=$(ifconfig "${IFACE}" inet | awk '/inet /{print $2}')
+IFACE_IP6=$(ifconfig "${IFACE}" inet6 | awk '/inet6 /{print $2}' | grep -v '^fe80' | head -1)
 
 echo "==> Loading pf anchor '${ANCHOR}'"
 
@@ -93,14 +95,25 @@ else
     fi
 fi
 
-# Build the anchor rules
+# Build IPv6 SSH bypass
+SSH6_BYPASS=""
+if [ -z "$PORTS" ] && [ -n "$IFACE_IP6" ]; then
+    SSH6_BYPASS="pass in quick on ${IFACE} inet6 proto tcp from any to ${IFACE_IP6} port 22
+"
+fi
+
+# Build the anchor rules (IPv4 + IPv6)
 if [ -n "$UPSTREAM" ]; then
-    RULES="${SSH_BYPASS}rdr on ${IFACE} proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
-rdr on lo0 proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+    RULES="${SSH_BYPASS}rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+rdr on lo0 inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+${SSH6_BYPASS}rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
+rdr on lo0 inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
 pass out quick on ${IFACE} proto tcp from any to ${UPSTREAM_IP} port ${UPSTREAM_PORT}
-pass out on ${IFACE} route-to (lo0 127.0.0.1) proto tcp from any to any${PORT_FILTER}"
+pass out on ${IFACE} inet route-to (lo0 127.0.0.1) proto tcp from any to any${PORT_FILTER}
+pass out on ${IFACE} inet6 route-to (lo0 ::1) proto tcp from any to any${PORT_FILTER}"
 else
-    RULES="${SSH_BYPASS}rdr on ${IFACE} proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}"
+    RULES="${SSH_BYPASS}rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+${SSH6_BYPASS}rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}"
 fi
 
 # Add anchor reference to main pf.conf if not already present

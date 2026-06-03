@@ -16,10 +16,12 @@ EOF
 
 [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage
 
-echo "Removing nftables trans_proxy table..."
-nft delete table ip trans_proxy 2>/dev/null || echo "Table 'trans_proxy' not found, skipping."
+echo "Removing nftables trans_proxy tables..."
+nft delete table ip trans_proxy 2>/dev/null || echo "IPv4 table 'trans_proxy' not found, skipping."
+nft delete table ip6 trans_proxy 2>/dev/null || echo "IPv6 table 'trans_proxy' not found, skipping."
 
 echo "Disabling IP forwarding..."
 sysctl -w net.ipv4.ip_forward=0
+sysctl -w net.ipv6.conf.all.forwarding=0
 
 echo "Done."
