@@ -72,7 +72,8 @@ async fn handle_connection(
     )?;
 
     // Try to extract SNI hostname from TLS ClientHello (port 443 traffic)
-    let sni_hostname = if orig_dest.port() == 443 {
+    let orig_ip = orig_dest.ip();
+    let sni_hostname = if config.sni && orig_dest.port() == 443 {
         match extract_sni(&inbound).await {
             Ok(Some(h)) => {
                 debug!("SNI extracted: {}", h);
@@ -91,18 +92,17 @@ async fn handle_connection(
         None
     };
 
-    // Fallback: look up hostname from DNS table if SNI wasn't available
     let hostname = sni_hostname.or_else(|| {
-        let h = dns_table.lookup(orig_dest.ip());
+        let h = dns_table.lookup(&orig_ip);
         if let Some(ref name) = h {
-            debug!("DNS table lookup: {} -> {}", orig_dest.ip(), name);
+            debug!("DNS table lookup: {} -> {}", orig_ip, name);
         }
         h
     });
 
     let dest_display = match &hostname {
-        Some(h) => format!("{}({}:{})", h, orig_dest.ip(), orig_dest.port()),
-        None => format!("{}:{}", orig_dest.ip(), orig_dest.port()),
+        Some(h) => format!("{}({}:{})", h, orig_ip, orig_dest.port()),
+        None => format!("{}:{}", orig_ip, orig_dest.port()),
     };
     info!("{} -> {} [connecting]", client_addr, dest_display);
 

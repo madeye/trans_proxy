@@ -86,17 +86,24 @@ fi
 
 # Remove existing rules to avoid duplicates
 if nft list table ip trans_proxy &>/dev/null; then
-    echo "Removing existing trans_proxy nftables table..."
+    echo "Removing existing trans_proxy IPv4 nftables table..."
     nft delete table ip trans_proxy
+fi
+if nft list table ip6 trans_proxy &>/dev/null; then
+    echo "Removing existing trans_proxy IPv6 nftables table..."
+    nft delete table ip6 trans_proxy
 fi
 
 echo "Enabling IP forwarding..."
 sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv6.conf.all.forwarding=1
 
-# Get interface IP for SSH bypass
+# Get interface IPs for SSH bypass
 IFACE_IP=$(ip -4 addr show "$IFACE" | grep -oP 'inet \K[0-9.]+' | head -1)
+IFACE_IP6=$(ip -6 addr show "$IFACE" scope global | grep -oP 'inet6 \K[0-9a-f:]+' | head -1)
 
-echo "Adding nftables NAT redirect rules on $IFACE -> port $PORT..."
+# --- IPv4 table ---
+echo "Adding nftables IPv4 NAT redirect rules on $IFACE -> port $PORT..."
 nft add table ip trans_proxy
 nft add chain ip trans_proxy prerouting { type nat hook prerouting priority -100 \; }
 if [ -n "$PORTS" ]; then
@@ -105,7 +112,6 @@ if [ -n "$PORTS" ]; then
         nft add rule ip trans_proxy prerouting iifname "$IFACE" tcp dport "$p" redirect to :"$PORT"
     done
 else
-    # Bypass SSH to interface IP to prevent lockout
     if [ -n "$IFACE_IP" ]; then
         nft add rule ip trans_proxy prerouting iifname "$IFACE" ip daddr "$IFACE_IP" tcp dport 22 return
     fi
@@ -113,12 +119,9 @@ else
 fi
 
 if [ -n "$FWMARK" ]; then
-    echo "Adding OUTPUT chain for local traffic (fwmark=$FWMARK)..."
+    echo "Adding IPv4 OUTPUT chain for local traffic (fwmark=$FWMARK)..."
     nft add chain ip trans_proxy output { type nat hook output priority -100 \; }
-    # Skip packets marked by the proxy (SO_MARK) to prevent loops
     nft add rule ip trans_proxy output meta mark "$FWMARK" return
-    # Skip traffic destined to the upstream proxy (covers connections the proxy
-    # cannot mark, e.g. DoH via reqwest)
     if [ -n "$UPSTREAM" ]; then
         echo "  Excluding upstream proxy destination $UPSTREAM..."
         nft add rule ip trans_proxy output ip daddr "$UPSTREAM_IP" tcp dport "$UPSTREAM_PORT" return
@@ -129,7 +132,6 @@ if [ -n "$FWMARK" ]; then
             nft add rule ip trans_proxy output tcp dport "$p" redirect to :"$PORT"
         done
     else
-        # Bypass SSH to interface IP to prevent lockout
         if [ -n "$IFACE_IP" ]; then
             nft add rule ip trans_proxy output ip daddr "$IFACE_IP" tcp dport 22 return
         fi
@@ -137,5 +139,45 @@ if [ -n "$FWMARK" ]; then
     fi
 fi
 
+# --- IPv6 table ---
+echo "Adding nftables IPv6 NAT redirect rules on $IFACE -> port $PORT..."
+nft add table ip6 trans_proxy
+nft add chain ip6 trans_proxy prerouting { type nat hook prerouting priority -100 \; }
+if [ -n "$PORTS" ]; then
+    IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
+    for p in "${PORT_ARRAY[@]}"; do
+        nft add rule ip6 trans_proxy prerouting iifname "$IFACE" tcp dport "$p" redirect to :"$PORT"
+    done
+else
+    if [ -n "$IFACE_IP6" ]; then
+        nft add rule ip6 trans_proxy prerouting iifname "$IFACE" ip6 daddr "$IFACE_IP6" tcp dport 22 return
+    fi
+    nft add rule ip6 trans_proxy prerouting iifname "$IFACE" meta l4proto tcp redirect to :"$PORT"
+fi
+
+if [ -n "$FWMARK" ]; then
+    echo "Adding IPv6 OUTPUT chain for local traffic (fwmark=$FWMARK)..."
+    nft add chain ip6 trans_proxy output { type nat hook output priority -100 \; }
+    nft add rule ip6 trans_proxy output meta mark "$FWMARK" return
+    if [ -n "$UPSTREAM" ]; then
+        echo "  Excluding upstream proxy destination $UPSTREAM (IPv6)..."
+        nft add rule ip6 trans_proxy output ip6 daddr "$UPSTREAM_IP" tcp dport "$UPSTREAM_PORT" return 2>/dev/null || true
+    fi
+    if [ -n "$PORTS" ]; then
+        IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
+        for p in "${PORT_ARRAY[@]}"; do
+            nft add rule ip6 trans_proxy output tcp dport "$p" redirect to :"$PORT"
+        done
+    else
+        if [ -n "$IFACE_IP6" ]; then
+            nft add rule ip6 trans_proxy output ip6 daddr "$IFACE_IP6" tcp dport 22 return
+        fi
+        nft add rule ip6 trans_proxy output meta l4proto tcp redirect to :"$PORT"
+    fi
+fi
+
 echo "Done. Current trans_proxy rules:"
+echo "--- IPv4 ---"
 nft list table ip trans_proxy
+echo "--- IPv6 ---"
+nft list table ip6 trans_proxy

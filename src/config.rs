@@ -11,7 +11,7 @@
 
 use clap::Parser;
 use std::fmt;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Upstream DNS target: either a UDP address or a DoH URL.
 #[derive(Debug, Clone)]
@@ -266,6 +266,10 @@ pub struct Config {
     #[arg(long, default_value_t = 1)]
     pub fwmark: u32,
 
+    /// Enable SNI hostname extraction from TLS ClientHello
+    #[arg(long)]
+    pub sni: bool,
+
     /// Comma-separated list of TCP ports to redirect.
     /// When omitted, all TCP traffic is redirected.
     #[arg(long)]
@@ -303,11 +307,55 @@ impl Config {
                     "Warning: could not detect IP for interface '{}', using 0.0.0.0",
                     self.interface
                 );
-                Ipv4Addr::UNSPECIFIED
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
             });
-            return Some(SocketAddr::new(ip.into(), 53));
+            return Some(SocketAddr::new(ip, 53));
         }
         None
+    }
+}
+
+/// Get the first IP address (preferring IPv4) of a network interface by name.
+fn get_interface_ip(name: &str) -> Option<IpAddr> {
+    use std::ffi::CString;
+
+    let ifname = CString::new(name).ok()?;
+
+    unsafe {
+        let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifaddrs) != 0 {
+            return None;
+        }
+
+        let mut cursor = ifaddrs;
+        let mut v4_result = None;
+        let mut v6_result = None;
+
+        while !cursor.is_null() {
+            let ifa = &*cursor;
+            let ifa_name = std::ffi::CStr::from_ptr(ifa.ifa_name);
+
+            if ifa_name == ifname.as_c_str() && !ifa.ifa_addr.is_null() {
+                let sa = &*ifa.ifa_addr;
+                if sa.sa_family as libc::c_int == libc::AF_INET && v4_result.is_none() {
+                    let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                    v4_result = Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                        sin.sin_addr.s_addr,
+                    ))));
+                } else if sa.sa_family as libc::c_int == libc::AF_INET6 && v6_result.is_none() {
+                    let sin6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                    let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+                    if !ip.is_loopback() && (ip.segments()[0] & 0xfe80) != 0xfe80 {
+                        v6_result = Some(IpAddr::V6(ip));
+                    }
+                }
+            }
+
+            cursor = ifa.ifa_next;
+        }
+
+        libc::freeifaddrs(ifaddrs);
+        v4_result.or(v6_result)
     }
 }
 
@@ -413,13 +461,12 @@ mod tests {
 
     #[test]
     fn test_get_interface_ip_loopback() {
-        // lo0 on macOS, lo on Linux — test whichever exists
         #[cfg(target_os = "macos")]
         let result = get_interface_ip("lo0");
         #[cfg(target_os = "linux")]
         let result = get_interface_ip("lo");
 
-        assert_eq!(result, Some(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(result, Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
     }
 
     #[test]
@@ -518,41 +565,5 @@ mod tests {
     fn test_ports_flag_default_none() {
         let config = Config::parse_from(["trans_proxy", "--upstream-proxy", "127.0.0.1:1082"]);
         assert!(config.ports.is_none());
-    }
-}
-
-/// Get the IPv4 address of a network interface by name.
-fn get_interface_ip(name: &str) -> Option<Ipv4Addr> {
-    use std::ffi::CString;
-
-    let ifname = CString::new(name).ok()?;
-
-    unsafe {
-        let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut ifaddrs) != 0 {
-            return None;
-        }
-
-        let mut cursor = ifaddrs;
-        let mut result = None;
-
-        while !cursor.is_null() {
-            let ifa = &*cursor;
-            let ifa_name = std::ffi::CStr::from_ptr(ifa.ifa_name);
-
-            if ifa_name == ifname.as_c_str() && !ifa.ifa_addr.is_null() {
-                let sa = &*ifa.ifa_addr;
-                if sa.sa_family as libc::c_int == libc::AF_INET {
-                    let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                    result = Some(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)));
-                    break;
-                }
-            }
-
-            cursor = ifa.ifa_next;
-        }
-
-        libc::freeifaddrs(ifaddrs);
-        result
     }
 }

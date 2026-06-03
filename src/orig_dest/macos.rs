@@ -23,16 +23,15 @@
 //! `divert-to` rules.
 
 use anyhow::{Context, Result};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 
-/// pf address wrapper matching struct pf_addr (union, we only use v4)
+/// pf address wrapper matching struct pf_addr (union of v4/v6 in a 16-byte field)
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct PfAddr {
-    /// union: `[u8; 16]` — we use the first 4 bytes as IPv4
     addr: [u8; 16],
 }
 
@@ -79,8 +78,9 @@ const fn diocnatlook_ioctl() -> libc::c_ulong {
 const DIOCNATLOOK: libc::c_ulong = diocnatlook_ioctl();
 
 const AF_INET: u8 = libc::AF_INET as u8;
+const AF_INET6: u8 = libc::AF_INET6 as u8;
 const IPPROTO_TCP: u8 = libc::IPPROTO_TCP as u8;
-const PF_OUT: u8 = 1; // We look up outbound NAT translations (rdr rewrites inbound, but state is PF_OUT for reply direction)
+const PF_OUT: u8 = 1;
 
 /// Handle to /dev/pf for NAT lookups.
 pub struct NatHandle {
@@ -118,32 +118,43 @@ impl AsRawFd for NatHandle {
 }
 
 /// Look up the original destination for a redirected connection using DIOCNATLOOK.
-///
-/// `client_addr`: the source address of the incoming connection
-/// `local_addr`: the address the connection arrived on (proxy listen addr after rdr)
 fn get_original_dest_pf(
     pf: &NatHandle,
-    client_addr: SocketAddrV4,
-    local_addr: SocketAddrV4,
-) -> Result<SocketAddrV4> {
+    client_addr: SocketAddr,
+    local_addr: SocketAddr,
+) -> Result<SocketAddr> {
+    let (af, src_octets, src_port, dst_octets, dst_port) = match (client_addr, local_addr) {
+        (SocketAddr::V4(c), SocketAddr::V4(l)) => {
+            let mut src = [0u8; 16];
+            src[..4].copy_from_slice(&c.ip().octets());
+            let mut dst = [0u8; 16];
+            dst[..4].copy_from_slice(&l.ip().octets());
+            (AF_INET, src, c.port(), dst, l.port())
+        }
+        (SocketAddr::V6(c), SocketAddr::V6(l)) => {
+            let mut src = [0u8; 16];
+            src.copy_from_slice(&c.ip().octets());
+            let mut dst = [0u8; 16];
+            dst.copy_from_slice(&l.ip().octets());
+            (AF_INET6, src, c.port(), dst, l.port())
+        }
+        _ => anyhow::bail!("Address family mismatch between client and local addr"),
+    };
+
     let mut nl = PfiocNatlook {
-        af: AF_INET,
+        af,
         proto: IPPROTO_TCP,
         direction: PF_OUT,
         ..PfiocNatlook::default()
     };
 
-    // Source: the client
-    nl.saddr.addr[..4].copy_from_slice(&client_addr.ip().octets());
-    nl.sport = client_addr.port().to_be();
-
-    // Destination: what we see (the proxy address after rdr)
-    nl.daddr.addr[..4].copy_from_slice(&local_addr.ip().octets());
-    nl.dport = local_addr.port().to_be();
+    nl.saddr.addr = src_octets;
+    nl.sport = src_port.to_be();
+    nl.daddr.addr = dst_octets;
+    nl.dport = dst_port.to_be();
 
     let ret = unsafe { libc::ioctl(pf.as_raw_fd(), DIOCNATLOOK, &mut nl as *mut PfiocNatlook) };
     if ret < 0 {
-        // Try PF_IN direction as fallback
         nl.direction = 0; // PF_IN
         let ret2 =
             unsafe { libc::ioctl(pf.as_raw_fd(), DIOCNATLOOK, &mut nl as *mut PfiocNatlook) };
@@ -153,40 +164,37 @@ fn get_original_dest_pf(
         }
     }
 
-    let mut ip_bytes = [0u8; 4];
-    ip_bytes.copy_from_slice(&nl.rdaddr.addr[..4]);
-    let ip = Ipv4Addr::from(ip_bytes);
     let port = u16::from_be(nl.rdport);
 
-    Ok(SocketAddrV4::new(ip, port))
+    match af {
+        AF_INET => {
+            let mut ip_bytes = [0u8; 4];
+            ip_bytes.copy_from_slice(&nl.rdaddr.addr[..4]);
+            Ok(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from(ip_bytes),
+                port,
+            )))
+        }
+        _ => {
+            let ip = Ipv6Addr::from(nl.rdaddr.addr);
+            Ok(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0)))
+        }
+    }
 }
 
 /// Determine original destination for a connection.
 ///
 /// Tries DIOCNATLOOK first, falls back to getsockname check.
-/// The `_stream` parameter is unused on macOS (needed on Linux for SO_ORIGINAL_DST).
 pub fn get_original_dest(
     pf: &NatHandle,
     _stream: &TcpStream,
     client_addr: SocketAddr,
     local_addr: SocketAddr,
     listen_addr: SocketAddr,
-) -> Result<SocketAddrV4> {
-    let client_v4 = match client_addr {
-        SocketAddr::V4(a) => a,
-        _ => anyhow::bail!("IPv6 not supported"),
-    };
-    let local_v4 = match local_addr {
-        SocketAddr::V4(a) => a,
-        _ => anyhow::bail!("IPv6 not supported"),
-    };
-
-    // Try DIOCNATLOOK first
-    match get_original_dest_pf(pf, client_v4, local_v4) {
+) -> Result<SocketAddr> {
+    match get_original_dest_pf(pf, client_addr, local_addr) {
         Ok(dest) => {
-            // Loop prevention: if original dest is our own listen address, reject
-            let dest_sa = SocketAddr::V4(dest);
-            if dest_sa == listen_addr {
+            if dest == listen_addr {
                 anyhow::bail!("Loop detected: original dest equals listen addr");
             }
             Ok(dest)
@@ -194,10 +202,8 @@ pub fn get_original_dest(
         Err(e) => {
             tracing::debug!("DIOCNATLOOK failed: {:#}, trying getsockname fallback", e);
 
-            // Fallback: if local_addr differs from listen_addr, it may be the original dest
-            // (works with divert-to rules)
-            if local_addr != listen_addr && local_v4.port() != listen_addr.port() {
-                Ok(local_v4)
+            if local_addr != listen_addr && local_addr.port() != listen_addr.port() {
+                Ok(local_addr)
             } else {
                 Err(e).context("Could not determine original destination")
             }

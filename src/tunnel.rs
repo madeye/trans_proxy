@@ -27,7 +27,7 @@
 //!   `route-to` rule would intercept it.
 
 use anyhow::{bail, Context, Result};
-use std::net::SocketAddrV4;
+use std::net::{IpAddr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -55,7 +55,7 @@ const MAX_RESPONSE_SIZE: usize = 8192;
 ///   on localhost, so packets never hit the `pass out on <iface>` pf rule.
 pub async fn connect_via_proxy(
     proxy: &UpstreamProxy,
-    dest: SocketAddrV4,
+    dest: SocketAddr,
     hostname: Option<&str>,
     #[cfg(target_os = "linux")] fwmark: Option<u32>,
     #[cfg(target_os = "macos")] local_traffic: bool,
@@ -98,12 +98,15 @@ pub async fn connect_via_proxy(
 /// Perform an HTTP CONNECT handshake on an established TCP stream.
 async fn handshake_http_connect(
     stream: &mut TcpStream,
-    dest: SocketAddrV4,
+    dest: SocketAddr,
     hostname: Option<&str>,
 ) -> Result<()> {
     let host = match hostname {
         Some(h) => h.to_string(),
-        None => dest.ip().to_string(),
+        None => match dest.ip() {
+            IpAddr::V6(ip) => format!("[{}]", ip),
+            ip => ip.to_string(),
+        },
     };
     let request = format!(
         "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n",
@@ -159,7 +162,7 @@ async fn handshake_http_connect(
 /// 3. **CONNECT** — request a tunnel to `dest` (using ATYP domain when `hostname` is available)
 async fn handshake_socks5(
     stream: &mut TcpStream,
-    dest: SocketAddrV4,
+    dest: SocketAddr,
     hostname: Option<&str>,
     auth: &ProxyAuth,
 ) -> Result<()> {
@@ -214,16 +217,20 @@ async fn handshake_socks5(
 
     match hostname {
         Some(h) if h.len() <= 255 => {
-            // ATYP 0x03: domain name
             req.push(0x03);
             req.push(h.len() as u8);
             req.extend_from_slice(h.as_bytes());
         }
-        _ => {
-            // ATYP 0x01: IPv4
-            req.push(0x01);
-            req.extend_from_slice(&dest.ip().octets());
-        }
+        _ => match dest.ip() {
+            IpAddr::V4(ip) => {
+                req.push(0x01);
+                req.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                req.push(0x04);
+                req.extend_from_slice(&ip.octets());
+            }
+        },
     }
     req.extend_from_slice(&dest.port().to_be_bytes());
 
@@ -380,13 +387,18 @@ fn bind_to_loopback(socket: &tokio::net::TcpSocket) -> std::io::Result<()> {
             "lo0 interface not found",
         ));
     }
-    // IP_BOUND_IF = 25 on macOS (from <netinet/in.h>)
     const IP_BOUND_IF: libc::c_int = 25;
+    const IPV6_BOUND_IF: libc::c_int = 125;
+    let (level, optname) = if socket.local_addr().is_ok_and(|a| a.is_ipv6()) {
+        (libc::IPPROTO_IPV6, IPV6_BOUND_IF)
+    } else {
+        (libc::IPPROTO_IP, IP_BOUND_IF)
+    };
     let ret = unsafe {
         libc::setsockopt(
             fd,
-            libc::IPPROTO_IP,
-            IP_BOUND_IF,
+            level,
+            optname,
             &lo0_index as *const libc::c_uint as *const libc::c_void,
             std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
         )
