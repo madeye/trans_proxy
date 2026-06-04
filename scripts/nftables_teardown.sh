@@ -22,6 +22,6 @@ nft delete table ip6 trans_proxy 2>/dev/null || echo "IPv6 table 'trans_proxy' n
 
 echo "Disabling IP forwarding..."
 sysctl -w net.ipv4.ip_forward=0
-sysctl -w net.ipv6.conf.all.forwarding=0
+sysctl -w net.ipv6.conf.all.forwarding=0 2>/dev/null || true
 
 echo "Done."
