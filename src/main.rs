@@ -66,6 +66,7 @@
 mod config;
 mod daemon;
 mod dns;
+mod gateway;
 mod orig_dest;
 mod proxy;
 mod service;
@@ -154,6 +155,15 @@ fn main() -> Result<()> {
                 }
             });
             info!("DNS forwarder started on {}", dns_listen);
+        }
+
+        if config.gateway {
+            let iface = config.interface.clone();
+            tokio::spawn(async move {
+                if let Err(e) = gateway::run(&iface).await {
+                    tracing::error!("Gateway advertisement failed: {:#}", e);
+                }
+            });
         }
 
         proxy::run(config, dns_table).await
