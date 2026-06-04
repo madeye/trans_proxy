@@ -100,7 +100,7 @@ sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
 
 # Get interface IPs for SSH bypass
 IFACE_IP=$(ip -4 addr show "$IFACE" | grep -oP 'inet \K[0-9.]+' | head -1)
-IFACE_IP6=$(ip -6 addr show "$IFACE" scope global | grep -oP 'inet6 \K[0-9a-f:]+' | head -1)
+IFACE_IP6=$(ip -6 addr show "$IFACE" scope global 2>/dev/null | grep -oP 'inet6 \K[0-9a-f:]+' | head -1 || true)
 
 # --- IPv4 table ---
 echo "Adding nftables IPv4 NAT redirect rules on $IFACE -> port $PORT..."
