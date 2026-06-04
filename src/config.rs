@@ -266,6 +266,12 @@ pub struct Config {
     #[arg(long, default_value_t = 1)]
     pub fwmark: u32,
 
+    /// Advertise this machine as the LAN default gateway.
+    /// Sends gratuitous ARP (IPv4) and Router Advertisements (IPv6) on the
+    /// interface to redirect LAN traffic through this machine.
+    #[arg(long)]
+    pub gateway: bool,
+
     /// Enable SNI hostname extraction from TLS ClientHello
     #[arg(long)]
     pub sni: bool,
