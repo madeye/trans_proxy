@@ -103,17 +103,19 @@ if [ -z "$PORTS" ] && [ -n "$IFACE_IP6" ]; then
 fi
 
 # Build the anchor rules (IPv4 + IPv6)
+# pf requires rules in order: options, normalization, queueing, translation, filtering
 if [ -n "$UPSTREAM" ]; then
-    RULES="${SSH_BYPASS}rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+    RULES="rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
 rdr on lo0 inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
-${SSH6_BYPASS}rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
+rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
 rdr on lo0 inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
-pass out quick on ${IFACE} proto tcp from any to ${UPSTREAM_IP} port ${UPSTREAM_PORT}
+${SSH_BYPASS}${SSH6_BYPASS}pass out quick on ${IFACE} proto tcp from any to ${UPSTREAM_IP} port ${UPSTREAM_PORT}
 pass out on ${IFACE} inet route-to (lo0 127.0.0.1) proto tcp from any to any${PORT_FILTER}
 pass out on ${IFACE} inet6 route-to (lo0 ::1) proto tcp from any to any${PORT_FILTER}"
 else
-    RULES="${SSH_BYPASS}rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
-${SSH6_BYPASS}rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}"
+    RULES="rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
+${SSH_BYPASS}${SSH6_BYPASS}"
 fi
 
 # Add anchor reference to main pf.conf if not already present
