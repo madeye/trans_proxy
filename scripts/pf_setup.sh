@@ -104,8 +104,22 @@ fi
 
 # Build the anchor rules (IPv4 + IPv6)
 # pf requires rules in order: options, normalization, queueing, translation, filtering
+# DNS interception rules (redirect all DNS to local forwarder)
+DNS_RDR=""
+if [ -n "$IFACE_IP" ]; then
+    DNS_RDR="rdr on ${IFACE} inet proto udp from any to any port 53 -> ${IFACE_IP} port 53
+rdr on ${IFACE} inet proto tcp from any to any port 53 -> ${IFACE_IP} port 53
+"
+fi
+DNS6_RDR=""
+if [ -n "$IFACE_IP6" ]; then
+    DNS6_RDR="rdr on ${IFACE} inet6 proto udp from any to any port 53 -> ${IFACE_IP6} port 53
+rdr on ${IFACE} inet6 proto tcp from any to any port 53 -> ${IFACE_IP6} port 53
+"
+fi
+
 if [ -n "$UPSTREAM" ]; then
-    RULES="rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+    RULES="${DNS_RDR}${DNS6_RDR}rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
 rdr on lo0 inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
 rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
 rdr on lo0 inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
@@ -113,7 +127,7 @@ ${SSH_BYPASS}${SSH6_BYPASS}pass out quick on ${IFACE} proto tcp from any to ${UP
 pass out on ${IFACE} inet route-to (lo0 127.0.0.1) proto tcp from any to any${PORT_FILTER}
 pass out on ${IFACE} inet6 route-to (lo0 ::1) proto tcp from any to any${PORT_FILTER}"
 else
-    RULES="rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
+    RULES="${DNS_RDR}${DNS6_RDR}rdr on ${IFACE} inet proto tcp from any to any${PORT_FILTER} -> 127.0.0.1 port ${PROXY_PORT}
 rdr on ${IFACE} inet6 proto tcp from any to any${PORT_FILTER} -> ::1 port ${PROXY_PORT}
 ${SSH_BYPASS}${SSH6_BYPASS}"
 fi
@@ -153,8 +167,7 @@ fi
 if [ -n "$UPSTREAM" ]; then
     echo "  Upstream:    ${UPSTREAM} (excluded from interception)"
 fi
-echo "  DNS:         use --dns flag to listen on ${IFACE_IP:-<interface-ip>}:53 directly"
+echo "  DNS:         all DNS traffic intercepted -> ${IFACE_IP:-<interface-ip>}:53"
 echo ""
 echo "Configure client devices to use ${IFACE_IP:-this machine} as their gateway."
-echo "Set DNS server to ${IFACE_IP:-this machine} on client devices."
 echo "Run scripts/pf_teardown.sh to undo."
