@@ -66,6 +66,7 @@
 mod config;
 mod daemon;
 mod dns;
+mod firewall;
 mod gateway;
 mod orig_dest;
 mod proxy;
@@ -98,6 +99,13 @@ fn main() -> Result<()> {
     }
     if config.stop {
         return service::stop();
+    }
+    if config.teardown_firewall {
+        return firewall::teardown();
+    }
+    if config.setup_firewall {
+        let fw_config = firewall::FirewallConfig::from_config(&config);
+        return firewall::setup(&fw_config);
     }
 
     // Daemonize before starting the async runtime

@@ -16,13 +16,14 @@ const FWMARK: u32 = 1;
 
 /// Guard that cleans up nftables rules on drop.
 struct NftablesGuard {
-    script_dir: PathBuf,
+    bin: PathBuf,
 }
 
 impl Drop for NftablesGuard {
     fn drop(&mut self) {
-        let script = self.script_dir.join("nftables_teardown.sh");
-        let _ = Command::new("bash").arg(&script).output();
+        let _ = Command::new(&self.bin)
+            .args(["--teardown-firewall", "--upstream-proxy", "127.0.0.1:1"])
+            .output();
     }
 }
 
@@ -43,27 +44,33 @@ fn setup_nftables(
     upstream: &str,
     ports: &str,
 ) -> Result<NftablesGuard> {
-    let script = root.join("scripts/nftables_setup.sh");
-    let output = Command::new("bash")
-        .arg(&script)
-        .arg("lo")
-        .arg(proxy_port.to_string())
-        .arg(FWMARK.to_string())
-        .arg(upstream)
-        .arg(ports)
+    let bin = root.join("target/release/trans_proxy");
+    let output = Command::new(&bin)
+        .args([
+            "--setup-firewall",
+            "--interface",
+            "lo",
+            "--listen-addr",
+            &format!("127.0.0.1:{proxy_port}"),
+            "--local-traffic",
+            "--fwmark",
+            &FWMARK.to_string(),
+            "--upstream-proxy",
+            upstream,
+            "--ports",
+            ports,
+        ])
         .output()
-        .context("failed to run nftables_setup.sh")?;
+        .context("failed to run trans_proxy --setup-firewall")?;
 
     if !output.status.success() {
         bail!(
-            "nftables_setup.sh failed:\n{}",
+            "trans_proxy --setup-firewall failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
 
-    Ok(NftablesGuard {
-        script_dir: root.join("scripts"),
-    })
+    Ok(NftablesGuard { bin })
 }
 
 async fn test_socks5_tunneling(root: &Path, ports: &TestServerPorts) -> Result<()> {

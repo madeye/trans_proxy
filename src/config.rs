@@ -296,6 +296,14 @@ pub struct Config {
     /// Stop the installed system service
     #[arg(long)]
     pub stop: bool,
+
+    /// Set up firewall rules (nftables on Linux, pf on macOS) and exit
+    #[arg(long)]
+    pub setup_firewall: bool,
+
+    /// Tear down firewall rules and exit
+    #[arg(long)]
+    pub teardown_firewall: bool,
 }
 
 impl Config {

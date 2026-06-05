@@ -11,11 +11,6 @@ use super::{check_root, extract_arg, filter_service_args, has_flag, run_cmd, set
 const UNIT_PATH: &str = "/etc/systemd/system/trans_proxy.service";
 const INSTALL_BIN: &str = "/usr/local/bin/trans_proxy";
 const SCRIPTS_DIR: &str = "/usr/local/lib/trans_proxy";
-const SETUP_SCRIPT: &str = "/usr/local/lib/trans_proxy/nftables_setup.sh";
-const TEARDOWN_SCRIPT: &str = "/usr/local/lib/trans_proxy/nftables_teardown.sh";
-
-const SETUP_SCRIPT_CONTENT: &str = include_str!("../../scripts/nftables_setup.sh");
-const TEARDOWN_SCRIPT_CONTENT: &str = include_str!("../../scripts/nftables_teardown.sh");
 
 /// Install trans_proxy as a systemd service.
 ///
@@ -38,16 +33,12 @@ pub fn install(args: &[String]) -> Result<()> {
     // Make sure it's executable
     set_executable(INSTALL_BIN)?;
 
-    // Install nftables scripts
-    println!("Installing nftables scripts to {SCRIPTS_DIR}/...");
-    std::fs::create_dir_all(SCRIPTS_DIR)
-        .with_context(|| format!("Failed to create {SCRIPTS_DIR}"))?;
-    std::fs::write(SETUP_SCRIPT, SETUP_SCRIPT_CONTENT)
-        .with_context(|| format!("Failed to write {SETUP_SCRIPT}"))?;
-    std::fs::write(TEARDOWN_SCRIPT, TEARDOWN_SCRIPT_CONTENT)
-        .with_context(|| format!("Failed to write {TEARDOWN_SCRIPT}"))?;
-    set_executable(SETUP_SCRIPT)?;
-    set_executable(TEARDOWN_SCRIPT)?;
+    // Clean up legacy scripts from previous installations
+    let scripts_dir = Path::new(SCRIPTS_DIR);
+    if scripts_dir.exists() {
+        println!("Removing legacy scripts from {SCRIPTS_DIR}/...");
+        let _ = std::fs::remove_dir_all(scripts_dir);
+    }
 
     // Generate and write the unit file
     let unit = generate_unit(args);
@@ -172,34 +163,31 @@ fn generate_unit(args: &[String]) -> String {
         format!("{} {}", INSTALL_BIN, filtered_args.join(" "))
     };
 
-    // Extract interface and port for nftables setup
-    let interface = extract_arg(&filtered_args, "--interface").unwrap_or("eth0");
-    let port = extract_arg(&filtered_args, "--listen-addr")
-        .and_then(|addr| addr.rsplit(':').next())
-        .unwrap_or("8443");
+    // Build --setup-firewall command from the same args
+    let mut setup_args = Vec::new();
+    setup_args.push("--setup-firewall".to_string());
 
-    let local_traffic = has_flag(&filtered_args, "--local-traffic");
-    let fwmark = extract_arg(&filtered_args, "--fwmark").unwrap_or("1");
-    let upstream = extract_arg(&filtered_args, "--upstream-proxy")
-        .map(|s| {
-            s.strip_prefix("http://")
-                .or(s.strip_prefix("socks5://"))
-                .unwrap_or(s)
-        })
-        // Strip socks5 userinfo (user:pass@host:port -> host:port)
-        .map(|s| s.rsplit('@').next().unwrap_or(s));
-    let ports = extract_arg(&filtered_args, "--ports");
+    // Forward firewall-relevant flags
+    for flag in [
+        "--interface",
+        "--listen-addr",
+        "--upstream-proxy",
+        "--ports",
+        "--fwmark",
+    ] {
+        if let Some(val) = extract_arg(&filtered_args, flag) {
+            setup_args.push(flag.to_string());
+            setup_args.push(val.to_string());
+        }
+    }
+    for flag in ["--local-traffic", "--dns"] {
+        if has_flag(&filtered_args, flag) {
+            setup_args.push(flag.to_string());
+        }
+    }
 
-    let fwmark_arg = if local_traffic { fwmark } else { "\"\"" };
-    let upstream_arg = if local_traffic {
-        upstream.unwrap_or("\"\"")
-    } else {
-        "\"\""
-    };
-    let setup_cmd = match ports {
-        Some(p) => format!("{SETUP_SCRIPT} {interface} {port} {fwmark_arg} {upstream_arg} {p}"),
-        None => format!("{SETUP_SCRIPT} {interface} {port} {fwmark_arg} {upstream_arg}"),
-    };
+    let setup_cmd = format!("{} {}", INSTALL_BIN, setup_args.join(" "));
+    let teardown_cmd = format!("{INSTALL_BIN} --teardown-firewall");
 
     format!(
         r#"[Unit]
@@ -211,7 +199,7 @@ Wants=network-online.target
 Type=simple
 ExecStartPre={setup_cmd}
 ExecStart={exec_start}
-ExecStopPost={TEARDOWN_SCRIPT}
+ExecStopPost={teardown_cmd}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -252,11 +240,11 @@ mod tests {
         assert!(unit.contains(
             "ExecStart=/usr/local/bin/trans_proxy --upstream-proxy 127.0.0.1:1082 --dns --interface eth0"
         ));
-        assert!(
-            unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443")
-        );
-        assert!(unit.contains("ExecStopPost=/usr/local/lib/trans_proxy/nftables_teardown.sh"));
-        // No User= line when local-traffic is not set
+        assert!(unit.contains("ExecStartPre=/usr/local/bin/trans_proxy --setup-firewall"));
+        assert!(unit.contains("--interface eth0"));
+        assert!(unit.contains("--upstream-proxy 127.0.0.1:1082"));
+        assert!(unit.contains("--dns"));
+        assert!(unit.contains("ExecStopPost=/usr/local/bin/trans_proxy --teardown-firewall"));
         assert!(!unit.contains("User="));
     }
 
@@ -266,12 +254,9 @@ mod tests {
         let unit = generate_unit(&args);
 
         assert!(unit.contains("ExecStart=/usr/local/bin/trans_proxy\n"));
-        // Should not have trailing space
         assert!(!unit.contains("ExecStart=/usr/local/bin/trans_proxy "));
-        // Defaults: eth0 interface, 8443 port
-        assert!(
-            unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443")
-        );
+        assert!(unit.contains("ExecStartPre=/usr/local/bin/trans_proxy --setup-firewall"));
+        assert!(unit.contains("ExecStopPost=/usr/local/bin/trans_proxy --teardown-firewall"));
     }
 
     #[test]
@@ -286,10 +271,9 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        assert!(
-            unit.contains("ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh wlan0 9999")
-        );
-        assert!(unit.contains("ExecStopPost=/usr/local/lib/trans_proxy/nftables_teardown.sh"));
+        assert!(unit.contains("--interface wlan0"));
+        assert!(unit.contains("--listen-addr 0.0.0.0:9999"));
+        assert!(unit.contains("ExecStopPost=/usr/local/bin/trans_proxy --teardown-firewall"));
     }
 
     #[test]
@@ -307,7 +291,6 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        // Filtered flags should not appear
         assert!(!unit.contains("--install"));
         assert!(!unit.contains("--daemon"));
         assert!(!unit.contains("--pid-file"));
@@ -315,7 +298,6 @@ mod tests {
         assert!(!unit.contains("/tmp/test.pid"));
         assert!(!unit.contains("/tmp/test.log"));
 
-        // Proxy args should remain
         assert!(unit.contains("--upstream-proxy"));
         assert!(unit.contains("127.0.0.1:1082"));
         assert!(unit.contains("--dns"));
@@ -342,37 +324,11 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        // No User= directive — fwmark-based filtering, no dedicated user needed
         assert!(!unit.contains("User="));
-        // Setup script should have fwmark and upstream proxy address
-        assert!(unit.contains(
-            "ExecStartPre=/usr/local/lib/trans_proxy/nftables_setup.sh eth0 8443 42 127.0.0.1:1082"
-        ));
-    }
-
-    #[test]
-    fn test_generate_unit_local_traffic_default_fwmark() {
-        let args: Vec<String> = vec![
-            "--upstream-proxy".into(),
-            "127.0.0.1:1082".into(),
-            "--local-traffic".into(),
-        ];
-        let unit = generate_unit(&args);
-
-        // No User= directive
-        assert!(!unit.contains("User="));
-        // Default fwmark=1, upstream proxy extracted
-        assert!(unit.contains("nftables_setup.sh eth0 8443 1 127.0.0.1:1082"));
-    }
-
-    #[test]
-    fn test_generate_unit_without_local_traffic() {
-        let args: Vec<String> = vec!["--upstream-proxy".into(), "127.0.0.1:1082".into()];
-        let unit = generate_unit(&args);
-
-        assert!(!unit.contains("User="));
-        // No fwmark or upstream args when local-traffic is not set
-        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" \"\"\n"));
+        assert!(unit.contains("--setup-firewall"));
+        assert!(unit.contains("--local-traffic"));
+        assert!(unit.contains("--fwmark 42"));
+        assert!(unit.contains("--upstream-proxy 127.0.0.1:1082"));
     }
 
     #[test]
@@ -387,7 +343,7 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" \"\" 22,80,443"));
+        assert!(unit.contains("--ports 22,80,443"));
     }
 
     #[test]
@@ -403,54 +359,8 @@ mod tests {
         ];
         let unit = generate_unit(&args);
 
-        assert!(unit.contains("nftables_setup.sh eth0 8443 5 127.0.0.1:1082 22,80,443"));
-    }
-
-    #[test]
-    fn test_generate_unit_without_ports_all_tcp() {
-        let args: Vec<String> = vec!["--upstream-proxy".into(), "127.0.0.1:1082".into()];
-        let unit = generate_unit(&args);
-
-        // Without ports, no 5th argument — script defaults to all TCP
-        assert!(unit.contains("nftables_setup.sh eth0 8443 \"\" \"\"\n"));
-    }
-
-    #[test]
-    fn test_generate_unit_local_traffic_without_ports() {
-        let args: Vec<String> = vec![
-            "--upstream-proxy".into(),
-            "127.0.0.1:1082".into(),
-            "--local-traffic".into(),
-        ];
-        let unit = generate_unit(&args);
-
-        // local-traffic + no ports: fwmark + upstream, no trailing port list
-        assert!(unit.contains("nftables_setup.sh eth0 8443 1 127.0.0.1:1082\n"));
-    }
-
-    #[test]
-    fn test_generate_unit_local_traffic_socks5_upstream() {
-        let args: Vec<String> = vec![
-            "--upstream-proxy".into(),
-            "socks5://127.0.0.1:1080".into(),
-            "--local-traffic".into(),
-        ];
-        let unit = generate_unit(&args);
-
-        // socks5:// prefix should be stripped, leaving just the address
-        assert!(unit.contains("nftables_setup.sh eth0 8443 1 127.0.0.1:1080\n"));
-    }
-
-    #[test]
-    fn test_generate_unit_local_traffic_socks5_auth_upstream() {
-        let args: Vec<String> = vec![
-            "--upstream-proxy".into(),
-            "socks5://user:pass@10.0.0.1:1080".into(),
-            "--local-traffic".into(),
-        ];
-        let unit = generate_unit(&args);
-
-        // socks5:// prefix and user:pass@ should be stripped
-        assert!(unit.contains("nftables_setup.sh eth0 8443 1 10.0.0.1:1080\n"));
+        assert!(unit.contains("--ports 22,80,443"));
+        assert!(unit.contains("--local-traffic"));
+        assert!(unit.contains("--fwmark 5"));
     }
 }
