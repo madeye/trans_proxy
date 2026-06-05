@@ -51,6 +51,8 @@ pub(crate) fn filter_service_args(args: &[String]) -> Vec<String> {
         "--stop",
         "--daemon",
         "-d",
+        "--setup-firewall",
+        "--teardown-firewall",
     ];
     let skip_with_value = ["--pid-file", "--log-file"];
 

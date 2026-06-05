@@ -14,12 +14,7 @@ const PLIST_PATH: &str = "/Library/LaunchDaemons/com.github.madeye.trans_proxy.p
 const INSTALL_BIN: &str = "/usr/local/bin/trans_proxy";
 const LOG_PATH: &str = "/var/log/trans_proxy.log";
 const SCRIPTS_DIR: &str = "/usr/local/lib/trans_proxy";
-const PF_SETUP_SCRIPT: &str = "/usr/local/lib/trans_proxy/pf_setup.sh";
-const PF_TEARDOWN_SCRIPT: &str = "/usr/local/lib/trans_proxy/pf_teardown.sh";
 const WRAPPER_SCRIPT: &str = "/usr/local/lib/trans_proxy/run.sh";
-
-const PF_SETUP_SCRIPT_CONTENT: &str = include_str!("../../scripts/pf_setup.sh");
-const PF_TEARDOWN_SCRIPT_CONTENT: &str = include_str!("../../scripts/pf_teardown.sh");
 
 /// Install trans_proxy as a launchd LaunchDaemon.
 ///
@@ -42,18 +37,19 @@ pub fn install(args: &[String]) -> Result<()> {
     // Make sure it's executable
     set_executable(INSTALL_BIN)?;
 
-    // Install pf scripts
-    println!("Installing pf scripts to {SCRIPTS_DIR}/...");
+    // Set up wrapper script directory
     std::fs::create_dir_all(SCRIPTS_DIR)
         .with_context(|| format!("Failed to create {SCRIPTS_DIR}"))?;
-    std::fs::write(PF_SETUP_SCRIPT, PF_SETUP_SCRIPT_CONTENT)
-        .with_context(|| format!("Failed to write {PF_SETUP_SCRIPT}"))?;
-    std::fs::write(PF_TEARDOWN_SCRIPT, PF_TEARDOWN_SCRIPT_CONTENT)
-        .with_context(|| format!("Failed to write {PF_TEARDOWN_SCRIPT}"))?;
-    set_executable(PF_SETUP_SCRIPT)?;
-    set_executable(PF_TEARDOWN_SCRIPT)?;
 
-    // Generate and install the wrapper script (runs pf setup/teardown around trans_proxy)
+    // Clean up legacy pf scripts from previous installations
+    for legacy in &[
+        "/usr/local/lib/trans_proxy/pf_setup.sh",
+        "/usr/local/lib/trans_proxy/pf_teardown.sh",
+    ] {
+        let _ = std::fs::remove_file(legacy);
+    }
+
+    // Generate and install the wrapper script
     let wrapper = generate_wrapper(args);
     println!("Installing wrapper script to {WRAPPER_SCRIPT}...");
     std::fs::write(WRAPPER_SCRIPT, &wrapper)
@@ -205,8 +201,8 @@ fn generate_plist(_args: &[String]) -> String {
     )
 }
 
-/// Build a wrapper shell script that runs pf setup before trans_proxy
-/// and tears down pf rules on exit.
+/// Build a wrapper shell script that runs firewall setup before trans_proxy
+/// and tears down rules on exit.
 fn generate_wrapper(args: &[String]) -> String {
     let filtered_args = filter_service_args(args);
 
@@ -216,44 +212,38 @@ fn generate_wrapper(args: &[String]) -> String {
         format!("{} {}", INSTALL_BIN, filtered_args.join(" "))
     };
 
-    // Extract interface and port for pf setup
-    let interface = extract_arg(&filtered_args, "--interface").unwrap_or("en0");
-    let port = extract_arg(&filtered_args, "--listen-addr")
-        .and_then(|addr| addr.rsplit(':').next())
-        .unwrap_or("8443");
+    // Build --setup-firewall command from the same args
+    let mut setup_args = Vec::new();
+    setup_args.push("--setup-firewall".to_string());
 
-    let local_traffic = has_flag(&filtered_args, "--local-traffic");
-    let upstream = extract_arg(&filtered_args, "--upstream-proxy")
-        .map(|s| {
-            s.strip_prefix("http://")
-                .or(s.strip_prefix("socks5://"))
-                .unwrap_or(s)
-        })
-        // Strip socks5 userinfo (user:pass@host:port -> host:port)
-        .map(|s| s.rsplit('@').next().unwrap_or(s));
-    let ports = extract_arg(&filtered_args, "--ports");
+    for flag in [
+        "--interface",
+        "--listen-addr",
+        "--upstream-proxy",
+        "--ports",
+    ] {
+        if let Some(val) = extract_arg(&filtered_args, flag) {
+            setup_args.push(flag.to_string());
+            setup_args.push(val.to_string());
+        }
+    }
+    for flag in ["--local-traffic", "--dns"] {
+        if has_flag(&filtered_args, flag) {
+            setup_args.push(flag.to_string());
+        }
+    }
 
-    let setup_cmd = match (local_traffic, ports) {
-        (true, Some(p)) => {
-            let upstream_arg = upstream.unwrap_or("\"\"");
-            format!("{PF_SETUP_SCRIPT} {interface} {port} {upstream_arg} {p}")
-        }
-        (true, None) => {
-            let upstream_arg = upstream.unwrap_or("\"\"");
-            format!("{PF_SETUP_SCRIPT} {interface} {port} {upstream_arg}")
-        }
-        (false, Some(p)) => format!("{PF_SETUP_SCRIPT} {interface} {port} \"\" {p}"),
-        (false, None) => format!("{PF_SETUP_SCRIPT} {interface} {port}"),
-    };
+    let setup_cmd = format!("{} {}", INSTALL_BIN, setup_args.join(" "));
+    let teardown_cmd = format!("{INSTALL_BIN} --teardown-firewall");
 
     format!(
         r#"#!/bin/bash
 # Auto-generated wrapper script for trans_proxy LaunchDaemon.
-# Sets up pf rules before starting, tears down on exit.
+# Sets up firewall rules before starting, tears down on exit.
 set -euo pipefail
 
 cleanup() {{
-    {PF_TEARDOWN_SCRIPT}
+    {teardown_cmd}
 }}
 trap cleanup EXIT
 
@@ -283,7 +273,6 @@ mod tests {
         assert!(plist.contains(&format!("<string>{WRAPPER_SCRIPT}</string>")));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
-        // Should NOT have UserName when local-traffic is not set
         assert!(!plist.contains("<key>UserName</key>"));
     }
 
@@ -296,9 +285,7 @@ mod tests {
         ];
         let plist = generate_plist(&args);
 
-        // No UserName — loop prevention uses IP_BOUND_IF + destination exclusion
         assert!(!plist.contains("<key>UserName</key>"));
-        // Plist uses wrapper script, not individual args
         assert!(plist.contains(&format!("<string>{WRAPPER_SCRIPT}</string>")));
     }
 
@@ -332,8 +319,11 @@ mod tests {
         assert!(wrapper.contains(&format!(
             "exec {INSTALL_BIN} --upstream-proxy 127.0.0.1:1082 --dns --interface en0"
         )));
-        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443")));
-        assert!(wrapper.contains(PF_TEARDOWN_SCRIPT));
+        assert!(wrapper.contains(&format!("{INSTALL_BIN} --setup-firewall")));
+        assert!(wrapper.contains("--interface en0"));
+        assert!(wrapper.contains("--upstream-proxy 127.0.0.1:1082"));
+        assert!(wrapper.contains("--dns"));
+        assert!(wrapper.contains(&format!("{INSTALL_BIN} --teardown-firewall")));
     }
 
     #[test]
@@ -348,7 +338,8 @@ mod tests {
         ];
         let wrapper = generate_wrapper(&args);
 
-        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en1 9999")));
+        assert!(wrapper.contains("--interface en1"));
+        assert!(wrapper.contains("--listen-addr 0.0.0.0:9999"));
     }
 
     #[test]
@@ -362,7 +353,9 @@ mod tests {
         ];
         let wrapper = generate_wrapper(&args);
 
-        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082")));
+        assert!(wrapper.contains("--setup-firewall"));
+        assert!(wrapper.contains("--local-traffic"));
+        assert!(wrapper.contains("--upstream-proxy 127.0.0.1:1082"));
     }
 
     #[test]
@@ -377,7 +370,7 @@ mod tests {
         ];
         let wrapper = generate_wrapper(&args);
 
-        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443 \"\" 80,443")));
+        assert!(wrapper.contains("--ports 80,443"));
     }
 
     #[test]
@@ -391,7 +384,8 @@ mod tests {
         ];
         let wrapper = generate_wrapper(&args);
 
-        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443 127.0.0.1:1082 80,443")));
+        assert!(wrapper.contains("--ports 80,443"));
+        assert!(wrapper.contains("--local-traffic"));
     }
 
     #[test]
@@ -400,7 +394,7 @@ mod tests {
         let wrapper = generate_wrapper(&args);
 
         assert!(wrapper.contains(&format!("exec {INSTALL_BIN}\n")));
-        assert!(wrapper.contains(&format!("{PF_SETUP_SCRIPT} en0 8443\n")));
+        assert!(wrapper.contains("--setup-firewall"));
     }
 
     #[test]
