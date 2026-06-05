@@ -118,6 +118,13 @@ else
     nft add rule ip trans_proxy prerouting iifname "$IFACE" meta l4proto tcp redirect to :"$PORT"
 fi
 
+# Intercept all DNS traffic and redirect to local DNS forwarder
+if [ -n "$IFACE_IP" ]; then
+    echo "Adding DNS interception rules (UDP+TCP port 53 -> $IFACE_IP:53)..."
+    nft add rule ip trans_proxy prerouting iifname "$IFACE" udp dport 53 dnat to "$IFACE_IP":53
+    nft add rule ip trans_proxy prerouting iifname "$IFACE" tcp dport 53 dnat to "$IFACE_IP":53
+fi
+
 if [ -n "$FWMARK" ]; then
     echo "Adding IPv4 OUTPUT chain for local traffic (fwmark=$FWMARK)..."
     nft add chain ip trans_proxy output { type nat hook output priority -100 \; }
@@ -154,6 +161,13 @@ setup_ipv6() {
             nft add rule ip6 trans_proxy prerouting iifname "$IFACE" ip6 daddr "$IFACE_IP6" tcp dport 22 return
         fi
         nft add rule ip6 trans_proxy prerouting iifname "$IFACE" meta l4proto tcp redirect to :"$PORT"
+    fi
+
+    # Intercept all DNS traffic and redirect to local DNS forwarder (IPv6)
+    if [ -n "$IFACE_IP6" ]; then
+        echo "Adding IPv6 DNS interception rules (UDP+TCP port 53 -> [$IFACE_IP6]:53)..."
+        nft add rule ip6 trans_proxy prerouting iifname "$IFACE" udp dport 53 dnat to "$IFACE_IP6":53
+        nft add rule ip6 trans_proxy prerouting iifname "$IFACE" tcp dport 53 dnat to "$IFACE_IP6":53
     fi
 
     if [ -n "$FWMARK" ]; then
