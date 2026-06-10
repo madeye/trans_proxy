@@ -4,6 +4,12 @@
 //! HTTP CONNECT or SOCKS5 handshake to the original destination, returning
 //! the connected stream for bidirectional relay.
 //!
+//! The HTTP CONNECT response is read in chunks, so bytes the upstream sends
+//! immediately after the header terminator (the start of the tunneled payload
+//! for server-speaks-first protocols) may land in the local buffer. Those
+//! leftover bytes are returned to the caller so none of the payload is lost;
+//! the SOCKS5 handshake uses exact-size reads and never over-reads.
+//!
 //! # Timeouts
 //!
 //! All phases of the handshake (connect, send, receive) are subject
@@ -42,7 +48,9 @@ const MAX_RESPONSE_SIZE: usize = 8192;
 /// Connects to `proxy.addr`, then performs either an HTTP CONNECT or SOCKS5
 /// handshake depending on [`proxy.protocol`](crate::config::ProxyProtocol).
 /// Returns the connected [`TcpStream`] with the handshake completed and
-/// all protocol framing consumed — ready for bidirectional relay.
+/// all protocol framing consumed — ready for bidirectional relay — plus any
+/// payload bytes read past the CONNECT response headers (usually empty; the
+/// caller must deliver them to the client before relaying).
 ///
 /// When `hostname` is `Some`, it is sent in the CONNECT/SOCKS5 request
 /// (as a domain name) instead of the raw destination IP, allowing the
@@ -59,7 +67,7 @@ pub async fn connect_via_proxy(
     hostname: Option<&str>,
     #[cfg(target_os = "linux")] fwmark: Option<u32>,
     #[cfg(target_os = "macos")] local_traffic: bool,
-) -> Result<TcpStream> {
+) -> Result<(TcpStream, Vec<u8>)> {
     let mut stream = timeout(CONNECT_TIMEOUT, async {
         let socket = if proxy.addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
@@ -83,24 +91,28 @@ pub async fn connect_via_proxy(
     .context("Timeout connecting to upstream proxy")?
     .context("Failed to connect to upstream proxy")?;
 
-    match &proxy.protocol {
-        ProxyProtocol::HttpConnect => {
-            handshake_http_connect(&mut stream, dest, hostname).await?;
-        }
+    let leftover = match &proxy.protocol {
+        ProxyProtocol::HttpConnect => handshake_http_connect(&mut stream, dest, hostname).await?,
         ProxyProtocol::Socks5(auth) => {
+            // SOCKS5 framing is consumed with exact-size reads — no leftover
             handshake_socks5(&mut stream, dest, hostname, auth).await?;
+            Vec::new()
         }
-    }
+    };
 
-    Ok(stream)
+    Ok((stream, leftover))
 }
 
 /// Perform an HTTP CONNECT handshake on an established TCP stream.
+///
+/// Returns any bytes read past the `\r\n\r\n` header terminator (the start
+/// of the tunneled payload for server-speaks-first protocols, or pipelined
+/// data from the proxy); usually empty.
 async fn handshake_http_connect(
     stream: &mut TcpStream,
     dest: SocketAddr,
     hostname: Option<&str>,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     let host = match hostname {
         Some(h) => h.to_string(),
         None => match dest.ip() {
@@ -143,7 +155,8 @@ async fn handshake_http_connect(
                 let header_str = std::str::from_utf8(&buf[..pos])
                     .context("Invalid UTF-8 in CONNECT response")?;
                 parse_connect_response(header_str)?;
-                return Ok(());
+                // Preserve any payload bytes read past the header terminator
+                return Ok(buf[pos..filled].to_vec());
             }
         }
     })
@@ -456,5 +469,61 @@ mod tests {
         assert_eq!(socks5_error_message(0x01), "general SOCKS server failure");
         assert_eq!(socks5_error_message(0x05), "connection refused");
         assert_eq!(socks5_error_message(0xFF), "unknown error");
+    }
+
+    /// Run handshake_http_connect against a fake proxy that replies with
+    /// `response` in a single write, returning the leftover bytes.
+    async fn run_connect_handshake(response: &'static [u8]) -> Result<Vec<u8>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Consume the CONNECT request headers
+            let mut buf = vec![0u8; 1024];
+            let mut filled = 0;
+            loop {
+                let n = stream.read(&mut buf[filled..]).await.unwrap();
+                assert!(n > 0, "client closed before sending CONNECT");
+                filled += n;
+                if find_header_end(&buf[..filled]).is_some() {
+                    break;
+                }
+            }
+            stream.write_all(response).await.unwrap();
+            stream
+        });
+
+        let mut stream = TcpStream::connect(addr).await?;
+        let dest: SocketAddr = "93.184.216.34:443".parse()?;
+        let leftover = handshake_http_connect(&mut stream, dest, Some("example.com")).await?;
+        server.await.unwrap();
+        Ok(leftover)
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_no_leftover() {
+        let leftover = run_connect_handshake(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(leftover.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_preserves_leftover_payload() {
+        // Upstream coalesces the first tunneled bytes (e.g. an SMTPS banner)
+        // with its CONNECT response — they must be returned, not dropped.
+        let leftover = run_connect_handshake(
+            b"HTTP/1.1 200 Connection established\r\n\r\n220 mail.example.com ESMTP\r\n",
+        )
+        .await
+        .unwrap();
+        assert_eq!(leftover, b"220 mail.example.com ESMTP\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_failure_status() {
+        let result = run_connect_handshake(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
+        assert!(result.is_err());
     }
 }
