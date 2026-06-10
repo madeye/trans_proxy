@@ -28,6 +28,14 @@
 //!   `application/dns-message`
 //! - **UDP** (e.g., `8.8.8.8:53`): Traditional DNS over UDP
 //!
+//! # AAAA stripping
+//!
+//! With `--dns-strip-aaaa`, AAAA queries are answered locally with an empty
+//! NOERROR (NODATA) response on all listeners (UDP, TCP, DoH upstream alike)
+//! and never forwarded. This keeps dual-stack clients on IPv4 — the only
+//! address family the transparent proxy intercepts — so IPv6-capable
+//! destinations cannot bypass the proxy and leak the real client address.
+//!
 //! # UDP hardening
 //!
 //! In UDP mode, each upstream query is sent with a fresh random transaction
@@ -313,9 +321,10 @@ fn rewrite_ttls(packet: &mut [u8], elapsed_secs: u32) -> Option<()> {
     Some(())
 }
 
-/// Synthesize a minimal SERVFAIL response from a DNS query: same transaction
-/// ID, QR=1, RA=1, RCODE=2, question section echoed, all other sections empty.
-fn build_servfail(query: &[u8]) -> Option<Vec<u8>> {
+/// Synthesize a minimal answerless response from a DNS query: same
+/// transaction ID, QR=1, RA=1, the given RCODE, question section echoed,
+/// all other sections empty.
+fn build_empty_response(query: &[u8], rcode: u8) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
     }
@@ -332,12 +341,23 @@ fn build_servfail(query: &[u8]) -> Option<Vec<u8>> {
     resp.extend_from_slice(&query[..12]);
     // QR=1; preserve opcode and RD; clear AA/TC
     resp[2] = 0x80 | (query[2] & 0x79);
-    // RA=1, RCODE=2 (SERVFAIL)
-    resp[3] = 0x82;
+    // RA=1 plus the response code
+    resp[3] = 0x80 | (rcode & 0x0F);
     // ANCOUNT = NSCOUNT = ARCOUNT = 0 (question count preserved)
     resp[6..12].fill(0);
     resp.extend_from_slice(&query[12..pos]);
     Some(resp)
+}
+
+/// Synthesize a SERVFAIL (RCODE=2) response for a failed query.
+fn build_servfail(query: &[u8]) -> Option<Vec<u8>> {
+    build_empty_response(query, 2)
+}
+
+/// Synthesize an empty NOERROR (NODATA) response, used to suppress AAAA
+/// answers when `--dns-strip-aaaa` is enabled.
+fn build_nodata(query: &[u8]) -> Option<Vec<u8>> {
+    build_empty_response(query, 0)
 }
 
 /// In-flight query coalescer: deduplicates concurrent DoH queries for the same domain.
@@ -384,6 +404,7 @@ pub async fn run(
     upstream: DnsUpstream,
     table: DnsTable,
     upstream_proxy: &UpstreamProxy,
+    strip_aaaa: bool,
 ) -> Result<()> {
     let tcp_upstream = match &upstream {
         DnsUpstream::Udp(addr) => TcpDnsUpstream::Tcp(*addr),
@@ -392,16 +413,19 @@ pub async fn run(
             url: url.clone(),
         },
     };
+    if strip_aaaa {
+        info!("DNS forwarder answering AAAA queries with empty NOERROR (--dns-strip-aaaa)");
+    }
 
     let udp = async {
         match upstream {
-            DnsUpstream::Udp(addr) => run_udp(listen_addr, addr, table.clone()).await,
+            DnsUpstream::Udp(addr) => run_udp(listen_addr, addr, table.clone(), strip_aaaa).await,
             DnsUpstream::Https(url) => {
-                run_doh(listen_addr, url, table.clone(), upstream_proxy).await
+                run_doh(listen_addr, url, table.clone(), upstream_proxy, strip_aaaa).await
             }
         }
     };
-    let tcp = run_tcp(listen_addr, tcp_upstream, table.clone());
+    let tcp = run_tcp(listen_addr, tcp_upstream, table.clone(), strip_aaaa);
 
     tokio::try_join!(udp, tcp)?;
     Ok(())
@@ -457,7 +481,12 @@ fn build_doh_client(upstream_proxy: &UpstreamProxy) -> Result<reqwest::Client> {
 /// Accepts length-prefixed DNS queries, forwards them upstream (over TCP for
 /// a UDP upstream address, or via DoH), populates the shared [`DnsTable`],
 /// and writes length-prefixed responses back.
-async fn run_tcp(listen_addr: SocketAddr, upstream: TcpDnsUpstream, table: DnsTable) -> Result<()> {
+async fn run_tcp(
+    listen_addr: SocketAddr,
+    upstream: TcpDnsUpstream,
+    table: DnsTable,
+    strip_aaaa: bool,
+) -> Result<()> {
     let listener = TcpListener::bind(listen_addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
             anyhow::anyhow!(
@@ -478,7 +507,9 @@ async fn run_tcp(listen_addr: SocketAddr, upstream: TcpDnsUpstream, table: DnsTa
         let upstream = upstream.clone();
         let table = table.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_dns_client(stream, client_addr, upstream, table).await {
+            if let Err(e) =
+                handle_tcp_dns_client(stream, client_addr, upstream, table, strip_aaaa).await
+            {
                 debug!("TCP DNS connection from {} closed: {:#}", client_addr, e);
             }
         });
@@ -492,6 +523,7 @@ async fn handle_tcp_dns_client(
     client_addr: SocketAddr,
     upstream: TcpDnsUpstream,
     table: DnsTable,
+    strip_aaaa: bool,
 ) -> Result<()> {
     loop {
         // Wait for the next query's 2-byte length prefix (idle timeout).
@@ -518,6 +550,25 @@ async fn handle_tcp_dns_client(
 
         let query_name = parse_query_name(&query).unwrap_or_default();
         debug!("DNS query from {} (TCP): {}", client_addr, query_name);
+
+        // Suppress AAAA resolution so dual-stack clients stay on IPv4
+        if strip_aaaa && parse_query_type(&query) == Some(DNS_TYPE_AAAA) {
+            if let Some(resp) = build_nodata(&query) {
+                debug!(
+                    "DNS: stripped AAAA query for {} from {} (TCP)",
+                    query_name, client_addr
+                );
+                stream
+                    .write_all(&(resp.len() as u16).to_be_bytes())
+                    .await
+                    .context("failed to write NODATA length")?;
+                stream
+                    .write_all(&resp)
+                    .await
+                    .context("failed to write NODATA body")?;
+            }
+            continue;
+        }
 
         let response = match tokio::time::timeout(
             TCP_DNS_QUERY_TIMEOUT,
@@ -666,7 +717,12 @@ fn pending_take_match(
 }
 
 /// Run the DNS forwarder with a traditional UDP upstream.
-async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTable) -> Result<()> {
+async fn run_udp(
+    listen_addr: SocketAddr,
+    upstream_dns: SocketAddr,
+    table: DnsTable,
+    strip_aaaa: bool,
+) -> Result<()> {
     let socket = UdpSocket::bind(listen_addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
             anyhow::anyhow!(
@@ -802,6 +858,20 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
             client_addr, query_name, client_tx_id
         );
 
+        // Suppress AAAA resolution so dual-stack clients stay on IPv4
+        if strip_aaaa && qtype == DNS_TYPE_AAAA {
+            if let Some(resp) = build_nodata(&buf[..n]) {
+                debug!(
+                    "DNS: stripped AAAA query for {} from {}",
+                    query_name, client_addr
+                );
+                if let Err(e) = socket.send_to(&resp, client_addr).await {
+                    warn!("DNS: failed to send NODATA to {}: {}", client_addr, e);
+                }
+            }
+            continue;
+        }
+
         // Store the pending query under a fresh random upstream transaction
         // ID so off-path attackers can't predict it from the client's ID
         let upstream_tx_id = {
@@ -842,6 +912,7 @@ async fn run_doh(
     doh_url: String,
     table: DnsTable,
     upstream_proxy: &UpstreamProxy,
+    strip_aaaa: bool,
 ) -> Result<()> {
     let socket = Arc::new(UdpSocket::bind(listen_addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -899,6 +970,20 @@ async fn run_doh(
         let ckey = cache_key(&query_name, &packet);
 
         debug!("DNS query from {}: {} (DoH)", client_addr, query_name);
+
+        // Suppress AAAA resolution so dual-stack clients stay on IPv4
+        if strip_aaaa && parse_query_type(&packet) == Some(DNS_TYPE_AAAA) {
+            if let Some(resp) = build_nodata(&packet) {
+                debug!(
+                    "DNS: stripped AAAA query for {} from {}",
+                    query_name, client_addr
+                );
+                if let Err(e) = socket.send_to(&resp, client_addr).await {
+                    warn!("DNS: failed to send NODATA to {}: {}", client_addr, e);
+                }
+            }
+            continue;
+        }
 
         // Fast path: serve from cache
         if let Some(cached) = cache.get(&ckey, tx_id) {
@@ -1309,8 +1394,8 @@ mod tests {
         assert_eq!(parse_ip_records(&pkt), None);
     }
 
-    /// Build a minimal DNS query for a domain name.
-    fn build_dns_query(domain: &str, tx_id: u16) -> Vec<u8> {
+    /// Build a minimal DNS query for a domain name with the given QTYPE.
+    fn build_dns_query_typed(domain: &str, tx_id: u16, qtype: u16) -> Vec<u8> {
         let mut pkt = Vec::new();
         pkt.extend_from_slice(&tx_id.to_be_bytes()); // TX ID
         pkt.extend_from_slice(&[0x01, 0x00]); // flags: standard query
@@ -1323,9 +1408,98 @@ mod tests {
             pkt.extend_from_slice(label.as_bytes());
         }
         pkt.push(0x00);
-        pkt.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+        pkt.extend_from_slice(&qtype.to_be_bytes());
         pkt.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
         pkt
+    }
+
+    /// Build a minimal DNS A query for a domain name.
+    fn build_dns_query(domain: &str, tx_id: u16) -> Vec<u8> {
+        build_dns_query_typed(domain, tx_id, DNS_TYPE_A)
+    }
+
+    #[test]
+    fn test_build_nodata() {
+        let query = build_dns_query_typed("example.com", 0xBEEF, DNS_TYPE_AAAA);
+        let resp = build_nodata(&query).unwrap();
+        // Same transaction ID
+        assert_eq!(&resp[..2], &[0xBE, 0xEF]);
+        // QR=1, RD preserved
+        assert_eq!(resp[2], 0x81);
+        // RA=1, RCODE=0 (NOERROR)
+        assert_eq!(resp[3], 0x80);
+        // QDCOUNT=1, no answers/authority/additional
+        assert_eq!(u16::from_be_bytes([resp[4], resp[5]]), 1);
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0);
+        assert_eq!(u16::from_be_bytes([resp[8], resp[9]]), 0);
+        assert_eq!(u16::from_be_bytes([resp[10], resp[11]]), 0);
+        // Question echoed
+        assert_eq!(parse_query_name(&resp), Some("example.com".to_string()));
+        assert_eq!(parse_query_type(&resp), Some(DNS_TYPE_AAAA));
+        assert_eq!(parse_ip_records(&resp), None);
+    }
+
+    /// With strip_aaaa enabled, AAAA queries get an immediate empty NOERROR
+    /// and are never forwarded upstream; A queries still pass through.
+    #[tokio::test]
+    async fn test_dns_udp_strip_aaaa() {
+        let fake_upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fake_upstream_addr = fake_upstream.local_addr().unwrap();
+
+        let table = DnsTable::new();
+        let forwarder_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let forwarder_addr = forwarder_socket.local_addr().unwrap();
+        drop(forwarder_socket);
+
+        let forwarder = tokio::spawn(async move {
+            let _ = run_udp(forwarder_addr, fake_upstream_addr, table, true).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // AAAA query: answered locally with empty NOERROR
+        let query = build_dns_query_typed("example.com", 0x4444, DNS_TYPE_AAAA);
+        client.send_to(&query, forwarder_addr).await.unwrap();
+        let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
+        let (n, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.recv_from(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let resp = &buf[..n];
+        assert_eq!(&resp[..2], &[0x44, 0x44]);
+        assert_eq!(resp[2] & 0x80, 0x80); // QR
+        assert_eq!(resp[3] & 0x0F, 0); // NOERROR
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0); // no answers
+
+        // The AAAA query must not have reached the upstream
+        let mut upstream_buf = vec![0u8; MAX_UDP_DNS_PACKET];
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            fake_upstream.recv_from(&mut upstream_buf),
+        )
+        .await
+        .is_err());
+
+        // A query: still forwarded upstream
+        let query = build_dns_query("example.com", 0x5555);
+        client.send_to(&query, forwarder_addr).await.unwrap();
+        let (n, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fake_upstream.recv_from(&mut upstream_buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            parse_query_name(&upstream_buf[..n]),
+            Some("example.com".to_string())
+        );
+
+        forwarder.abort();
     }
 
     #[test]
@@ -1462,7 +1636,7 @@ mod tests {
 
         // Start the DNS forwarder
         let forwarder = tokio::spawn(async move {
-            let _ = run_udp(forwarder_addr, fake_upstream_addr, forwarder_table).await;
+            let _ = run_udp(forwarder_addr, fake_upstream_addr, forwarder_table, false).await;
         });
 
         // Give the forwarder time to bind
@@ -1552,6 +1726,7 @@ mod tests {
                 forwarder_addr,
                 TcpDnsUpstream::Tcp(fake_upstream_addr),
                 forwarder_table,
+                false,
             )
             .await;
         });

@@ -234,6 +234,13 @@ pub struct Config {
     #[arg(long, default_value = "https://cloudflare-dns.com/dns-query")]
     pub dns_upstream: DnsUpstream,
 
+    /// Answer AAAA queries with an empty NOERROR response instead of
+    /// forwarding them upstream. Forces dual-stack clients onto IPv4 — the
+    /// only address family the transparent proxy intercepts — so IPv6-capable
+    /// destinations can't bypass the proxy.
+    #[arg(long)]
+    pub dns_strip_aaaa: bool,
+
     /// Network interface for DNS binding (e.g., en0). Used with --dns to auto-detect IP.
     #[arg(long, default_value = DEFAULT_INTERFACE)]
     pub interface: String,
