@@ -127,6 +127,28 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
                 ],
             )?;
         }
+        // Never transparent-proxy traffic addressed to the gateway itself
+        // (e.g. a LAN device reaching a service bound to one of the Pi's own
+        // addresses). `fib daddr type local` matches any local address, so it
+        // is robust to rotating dynamic addresses and must precede the
+        // catch-all redirect below.
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip",
+                "trans_proxy",
+                "prerouting",
+                "iifname",
+                iface,
+                "fib",
+                "daddr",
+                "type",
+                "local",
+                "return",
+            ],
+        )?;
         run_cmd(
             "nft",
             &[
@@ -379,6 +401,27 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
                 ],
             )?;
         }
+        // Never transparent-proxy traffic addressed to the gateway itself.
+        // `fib daddr type local` matches any of the Pi's own addresses, which
+        // is essential for IPv6 where dynamic addresses rotate; must precede
+        // the catch-all redirect below.
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip6",
+                "trans_proxy",
+                "prerouting",
+                "iifname",
+                iface,
+                "fib",
+                "daddr",
+                "type",
+                "local",
+                "return",
+            ],
+        )?;
         run_cmd(
             "nft",
             &[
