@@ -3,6 +3,10 @@
 //! Installs trans_proxy as a systemd service so it starts automatically
 //! on boot. Requires root privileges.
 
+// Compiled on non-Linux platforms for test coverage; the public entry points
+// are only wired up in `service::mod` on Linux.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use anyhow::{Context, Result};
 use std::path::Path;
 
