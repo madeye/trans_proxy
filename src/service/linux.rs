@@ -3,8 +3,8 @@
 //! Installs trans_proxy as a systemd service so it starts automatically
 //! on boot. Requires root privileges.
 
-// Compiled on non-Linux platforms for test coverage; the public entry points
-// are only wired up in `service::mod` on Linux.
+// This module is compiled on macOS for test coverage (see `src/service/`),
+// where its public API has no callers — suppress dead_code there.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use anyhow::{Context, Result};

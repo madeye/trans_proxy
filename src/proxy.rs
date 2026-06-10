@@ -15,8 +15,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::io::copy_bidirectional;
+use tokio::io::{copy_bidirectional_with_sizes, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -24,6 +25,18 @@ use crate::dns::DnsTable;
 use crate::orig_dest::{get_original_dest, NatHandle};
 use crate::sni::extract_sni;
 use crate::tunnel::connect_via_proxy;
+
+/// Maximum time to wait for the client's TLS ClientHello before proceeding
+/// without SNI (a silent client must not park the task forever).
+const SNI_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Pause before retrying after a failed `accept()` (EMFILE, ECONNABORTED, ...)
+/// so the loop doesn't spin while the condition persists.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Per-direction relay buffer size (tokio's 8 KB default costs ~8x more
+/// syscalls per MB on bulk transfers).
+const RELAY_BUF_SIZE: usize = 64 * 1024;
 
 /// Run the transparent proxy accept loop.
 pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
@@ -46,7 +59,16 @@ pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
     info!("Listening on {}", config.listen_addr);
 
     loop {
-        let (stream, client_addr) = listener.accept().await?;
+        // Transient accept errors (fd exhaustion, connections dying in the
+        // backlog) must not kill the whole proxy — log, back off, retry.
+        let (stream, client_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("Accept failed: {}; retrying", e);
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
+        };
         let nat_handle = Arc::clone(&nat_handle);
         let config = config.clone();
         let dns_table = dns_table.clone();
@@ -70,6 +92,12 @@ async fn handle_connection(
     config: &Config,
     dns_table: &DnsTable,
 ) -> Result<()> {
+    // Disable Nagle's algorithm: a relay's small writes (handshakes, request/
+    // response turnarounds) would otherwise stall on delayed ACKs.
+    if let Err(e) = inbound.set_nodelay(true) {
+        debug!("Failed to set TCP_NODELAY on inbound socket: {}", e);
+    }
+
     let local_addr = inbound.local_addr()?;
 
     let orig_dest = get_original_dest(
@@ -83,17 +111,23 @@ async fn handle_connection(
     // Try to extract SNI hostname from TLS ClientHello (port 443 traffic)
     let orig_ip = orig_dest.ip();
     let sni_hostname = if config.sni && orig_dest.port() == 443 {
-        match extract_sni(&inbound).await {
-            Ok(Some(h)) => {
+        // Bounded wait: a client that never sends a ClientHello must not
+        // park this task forever — proceed without SNI on timeout.
+        match timeout(SNI_TIMEOUT, extract_sni(&inbound)).await {
+            Ok(Ok(Some(h))) => {
                 debug!("SNI extracted: {}", h);
                 Some(h)
             }
-            Ok(None) => {
+            Ok(Ok(None)) => {
                 debug!("No SNI in ClientHello (non-TLS or missing extension)");
                 None
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 debug!("SNI extraction failed: {:#}", e);
+                None
+            }
+            Err(_) => {
+                debug!("SNI extraction timed out after {:?}", SNI_TIMEOUT);
                 None
             }
         }
@@ -121,7 +155,7 @@ async fn handle_connection(
     } else {
         None
     };
-    let mut outbound = connect_via_proxy(
+    let (mut outbound, leftover) = connect_via_proxy(
         &config.upstream_proxy,
         orig_dest,
         hostname.as_deref(),
@@ -133,7 +167,19 @@ async fn handle_connection(
     .await?;
     debug!("{} -> {} [tunnel established]", client_addr, dest_display);
 
-    let (client_bytes, server_bytes) = copy_bidirectional(&mut inbound, &mut outbound).await?;
+    if let Err(e) = outbound.set_nodelay(true) {
+        debug!("Failed to set TCP_NODELAY on outbound socket: {}", e);
+    }
+
+    // Deliver any payload bytes the upstream coalesced with its CONNECT
+    // response (server-speaks-first protocols) before starting the relay
+    if !leftover.is_empty() {
+        inbound.write_all(&leftover).await?;
+    }
+
+    let (client_bytes, server_bytes) =
+        copy_bidirectional_with_sizes(&mut inbound, &mut outbound, RELAY_BUF_SIZE, RELAY_BUF_SIZE)
+            .await?;
     info!(
         "{} -> {} [closed] tx={} rx={}",
         client_addr, dest_display, client_bytes, server_bytes
