@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
 
 use crate::config::Config;
@@ -26,7 +26,8 @@ pub struct FirewallConfig {
     pub fwmark: Option<u32>,
     pub upstream_addr: Option<SocketAddr>,
     pub ports: Option<Vec<u16>>,
-    pub dns: bool,
+    /// Resolved DNS forwarder listen address. `None` disables DNS interception.
+    pub dns_listen: Option<SocketAddr>,
 }
 
 impl FirewallConfig {
@@ -53,7 +54,40 @@ impl FirewallConfig {
             fwmark,
             upstream_addr,
             ports,
-            dns: config.dns,
+            dns_listen: config.resolve_dns_listen(),
+        }
+    }
+
+    /// IPv4 dnat/rdr target for intercepted DNS.
+    ///
+    /// Uses the resolved listen address when it is a specific IPv4 address;
+    /// falls back to the detected interface IPv4 (with the configured port)
+    /// when the forwarder binds a wildcard address. Returns `None` when the
+    /// forwarder cannot receive IPv4 traffic (bound to a specific IPv6
+    /// address) or no target IP is available.
+    pub(crate) fn dns_target_v4(&self, iface_v4: Option<Ipv4Addr>) -> Option<(Ipv4Addr, u16)> {
+        let listen = self.dns_listen?;
+        match listen.ip() {
+            IpAddr::V4(ip) if !ip.is_unspecified() => Some((ip, listen.port())),
+            // 0.0.0.0 binds all IPv4; :: usually accepts IPv4-mapped traffic too
+            IpAddr::V4(_) => iface_v4.map(|ip| (ip, listen.port())),
+            IpAddr::V6(ip) if ip.is_unspecified() => iface_v4.map(|ip| (ip, listen.port())),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    /// IPv6 dnat/rdr target for intercepted DNS.
+    ///
+    /// Uses the resolved listen address when it is a specific IPv6 address;
+    /// falls back to the detected interface IPv6 when the forwarder binds the
+    /// IPv6 wildcard. Returns `None` for IPv4 binds, which cannot receive
+    /// IPv6 traffic — emitting a rule would blackhole LAN IPv6 DNS.
+    pub(crate) fn dns_target_v6(&self, iface_v6: Option<Ipv6Addr>) -> Option<(Ipv6Addr, u16)> {
+        let listen = self.dns_listen?;
+        match listen.ip() {
+            IpAddr::V6(ip) if !ip.is_unspecified() => Some((ip, listen.port())),
+            IpAddr::V6(_) => iface_v6.map(|ip| (ip, listen.port())),
+            IpAddr::V4(_) => None,
         }
     }
 }
@@ -159,7 +193,6 @@ mod tests {
             "trans_proxy",
             "--upstream-proxy",
             "127.0.0.1:1082",
-            "--dns",
             "--interface",
             "eth0",
         ]);
@@ -169,7 +202,96 @@ mod tests {
         assert!(fw.fwmark.is_none());
         assert!(fw.upstream_addr.is_none());
         assert!(fw.ports.is_none());
-        assert!(fw.dns);
+        assert!(fw.dns_listen.is_none());
+    }
+
+    #[test]
+    fn test_firewall_config_uses_resolved_dns_listen() {
+        use clap::Parser;
+        let config = Config::parse_from([
+            "trans_proxy",
+            "--upstream-proxy",
+            "127.0.0.1:1082",
+            "--dns",
+            "--dns-listen",
+            "192.168.1.1:5353",
+        ]);
+        let fw = FirewallConfig::from_config(&config);
+        assert_eq!(fw.dns_listen, Some("192.168.1.1:5353".parse().unwrap()));
+    }
+
+    fn fw_with_dns_listen(listen: Option<&str>) -> FirewallConfig {
+        FirewallConfig {
+            interface: "eth0".to_string(),
+            proxy_port: 8443,
+            fwmark: None,
+            upstream_addr: None,
+            ports: None,
+            dns_listen: listen.map(|s| s.parse().unwrap()),
+        }
+    }
+
+    #[test]
+    fn test_dns_target_v4_specific_listen_addr() {
+        let fw = fw_with_dns_listen(Some("192.168.1.1:5353"));
+        let iface_v4 = Some(Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(
+            fw.dns_target_v4(iface_v4),
+            Some((Ipv4Addr::new(192, 168, 1, 1), 5353))
+        );
+        // A specific IPv4 bind cannot receive IPv6 traffic
+        assert_eq!(
+            fw.dns_target_v6(Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))),
+            None
+        );
+    }
+
+    #[test]
+    fn test_dns_target_v4_unspecified_falls_back_to_interface() {
+        let fw = fw_with_dns_listen(Some("0.0.0.0:53"));
+        let iface_v4 = Some(Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(
+            fw.dns_target_v4(iface_v4),
+            Some((Ipv4Addr::new(10, 0, 0, 1), 53))
+        );
+        assert_eq!(fw.dns_target_v4(None), None);
+    }
+
+    #[test]
+    fn test_dns_target_v6_specific_listen_addr() {
+        let fw = fw_with_dns_listen(Some("[2001:db8::1]:5353"));
+        let iface_v6 = Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        assert_eq!(
+            fw.dns_target_v6(iface_v6),
+            Some((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 5353))
+        );
+    }
+
+    #[test]
+    fn test_dns_target_v6_unspecified_dual_stack() {
+        // [::]:53 accepts both families: v6 falls back to the interface IPv6,
+        // v4 falls back to the interface IPv4 (IPv4-mapped traffic).
+        let fw = fw_with_dns_listen(Some("[::]:53"));
+        let iface_v4 = Some(Ipv4Addr::new(10, 0, 0, 1));
+        let iface_v6 = Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        assert_eq!(
+            fw.dns_target_v6(iface_v6),
+            Some((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1), 53))
+        );
+        assert_eq!(
+            fw.dns_target_v4(iface_v4),
+            Some((Ipv4Addr::new(10, 0, 0, 1), 53))
+        );
+    }
+
+    #[test]
+    fn test_dns_target_none_when_dns_disabled() {
+        let fw = fw_with_dns_listen(None);
+        assert_eq!(fw.dns_target_v4(Some(Ipv4Addr::new(10, 0, 0, 1))), None);
+        assert_eq!(
+            fw.dns_target_v6(Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1))),
+            None
+        );
     }
 
     #[test]
