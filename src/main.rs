@@ -157,8 +157,9 @@ fn main() -> Result<()> {
             let table = dns_table.clone();
             let upstream = config.dns_upstream.clone();
             let upstream_proxy = config.upstream_proxy.clone();
+            let strip_aaaa = config.dns_strip_aaaa;
             let handle = tokio::spawn(async move {
-                dns::run(dns_listen, upstream, table, &upstream_proxy).await
+                dns::run(dns_listen, upstream, table, &upstream_proxy, strip_aaaa).await
             });
             info!("DNS forwarder started on {}", dns_listen);
             Some(handle)
