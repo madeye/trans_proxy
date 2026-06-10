@@ -1,9 +1,13 @@
 //! Local DNS forwarder with IP→domain mapping capture.
 //!
-//! Listens directly on the gateway interface (port 53) for DNS queries from
-//! LAN clients, forwards them to a configured upstream server (via UDP or
-//! DNS-over-HTTPS), and parses A records from responses to build an IP→domain
-//! lookup table shared with the proxy.
+//! Listens directly on the gateway interface (port 53, both UDP and TCP) for
+//! DNS queries from LAN clients, forwards them to a configured upstream
+//! server (via UDP or DNS-over-HTTPS), and parses A records from responses to
+//! build an IP→domain lookup table shared with the proxy.
+//!
+//! The TCP listener implements RFC 7766 framing (2-byte big-endian length
+//! prefix per message) so clients retrying truncated UDP responses over TCP
+//! keep working when the firewall intercepts TCP port 53.
 //!
 //! # Purpose
 //!
@@ -51,7 +55,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -61,6 +66,10 @@ const MAX_DNS_PACKET: usize = 1500;
 /// Maximum DNS message size over UDP (EDNS0 responses can far exceed 1500
 /// bytes; recv() silently truncates anything larger than the buffer).
 const MAX_UDP_DNS_PACKET: usize = 65_535;
+/// Per-query timeout for TCP DNS forwarding (read body + upstream round-trip).
+const TCP_DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Idle timeout for a TCP DNS connection waiting for the next query.
+const TCP_DNS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CACHE_ENTRIES: usize = 10_000;
 /// How long an unanswered upstream query stays in the pending map.
 const PENDING_QUERY_TTL: Duration = Duration::from_secs(5);
@@ -367,15 +376,230 @@ impl QueryCoalescer {
 }
 
 /// Run the DNS forwarder, dispatching to UDP or DoH based on upstream config.
+///
+/// Runs a UDP listener and an RFC 7766 TCP listener concurrently on the same
+/// address; if either fails, the error propagates to the caller.
 pub async fn run(
     listen_addr: SocketAddr,
     upstream: DnsUpstream,
     table: DnsTable,
     upstream_proxy: &UpstreamProxy,
 ) -> Result<()> {
+    let tcp_upstream = match &upstream {
+        DnsUpstream::Udp(addr) => TcpDnsUpstream::Tcp(*addr),
+        DnsUpstream::Https(url) => TcpDnsUpstream::Doh {
+            client: build_doh_client(upstream_proxy)?,
+            url: url.clone(),
+        },
+    };
+
+    let udp = async {
+        match upstream {
+            DnsUpstream::Udp(addr) => run_udp(listen_addr, addr, table.clone()).await,
+            DnsUpstream::Https(url) => {
+                run_doh(listen_addr, url, table.clone(), upstream_proxy).await
+            }
+        }
+    };
+    let tcp = run_tcp(listen_addr, tcp_upstream, table.clone());
+
+    tokio::try_join!(udp, tcp)?;
+    Ok(())
+}
+
+/// Upstream target for the TCP DNS listener.
+#[derive(Clone)]
+enum TcpDnsUpstream {
+    /// Forward over a TCP connection to the same address as the UDP upstream.
+    Tcp(SocketAddr),
+    /// Forward via DNS-over-HTTPS (no message size constraints).
+    Doh {
+        client: reqwest::Client,
+        url: String,
+    },
+}
+
+impl std::fmt::Display for TcpDnsUpstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TcpDnsUpstream::Tcp(addr) => write!(f, "TCP {}", addr),
+            TcpDnsUpstream::Doh { url, .. } => write!(f, "DoH {}", url),
+        }
+    }
+}
+
+/// Build an HTTP/2-capable DoH client that routes through the upstream proxy.
+///
+/// Mirrors the client construction in [`run_doh`]; kept as a separate,
+/// dedicated client so the TCP listener does not share state with the UDP
+/// DoH path.
+fn build_doh_client(upstream_proxy: &UpstreamProxy) -> Result<reqwest::Client> {
+    let proxy_url = match &upstream_proxy.protocol {
+        ProxyProtocol::HttpConnect => format!("http://{}", upstream_proxy.addr),
+        ProxyProtocol::Socks5(ProxyAuth::None) => {
+            format!("socks5://{}", upstream_proxy.addr)
+        }
+        ProxyProtocol::Socks5(ProxyAuth::UsernamePassword { username, password }) => {
+            format!("socks5://{}:{}@{}", username, password, upstream_proxy.addr)
+        }
+    };
+    let proxy = reqwest::Proxy::all(&proxy_url).context("Invalid upstream proxy URL for DoH")?;
+    reqwest::Client::builder()
+        .proxy(proxy)
+        .pool_max_idle_per_host(2)
+        .pool_idle_timeout(Duration::from_secs(300))
+        .build()
+        .context("Failed to build HTTP client for DoH")
+}
+
+/// Run the TCP DNS listener (RFC 7766).
+///
+/// Accepts length-prefixed DNS queries, forwards them upstream (over TCP for
+/// a UDP upstream address, or via DoH), populates the shared [`DnsTable`],
+/// and writes length-prefixed responses back.
+async fn run_tcp(listen_addr: SocketAddr, upstream: TcpDnsUpstream, table: DnsTable) -> Result<()> {
+    let listener = TcpListener::bind(listen_addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "Failed to bind TCP DNS listener on {}: port already in use by another process",
+                listen_addr
+            )
+        } else {
+            anyhow::anyhow!("Failed to bind TCP DNS listener on {}: {}", listen_addr, e)
+        }
+    })?;
+    info!(
+        "DNS forwarder listening on {} (TCP), upstream {}",
+        listen_addr, upstream
+    );
+
+    loop {
+        let (stream, client_addr) = listener.accept().await.context("TCP DNS accept failed")?;
+        let upstream = upstream.clone();
+        let table = table.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_dns_client(stream, client_addr, upstream, table).await {
+                debug!("TCP DNS connection from {} closed: {:#}", client_addr, e);
+            }
+        });
+    }
+}
+
+/// Handle one TCP DNS client connection: read length-prefixed queries in a
+/// loop, forward each upstream, and write back length-prefixed responses.
+async fn handle_tcp_dns_client(
+    mut stream: TcpStream,
+    client_addr: SocketAddr,
+    upstream: TcpDnsUpstream,
+    table: DnsTable,
+) -> Result<()> {
+    loop {
+        // Wait for the next query's 2-byte length prefix (idle timeout).
+        let mut len_buf = [0u8; 2];
+        match tokio::time::timeout(TCP_DNS_IDLE_TIMEOUT, stream.read_exact(&mut len_buf)).await {
+            Err(_) => {
+                debug!("TCP DNS: idle timeout for {}", client_addr);
+                return Ok(());
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Ok(Err(e)) => return Err(e).context("failed to read query length"),
+            Ok(Ok(_)) => {}
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+        if len < 12 {
+            anyhow::bail!("query too short ({len} bytes)");
+        }
+
+        let mut query = vec![0u8; len];
+        tokio::time::timeout(TCP_DNS_QUERY_TIMEOUT, stream.read_exact(&mut query))
+            .await
+            .context("timed out reading query body")?
+            .context("failed to read query body")?;
+
+        let query_name = parse_query_name(&query).unwrap_or_default();
+        debug!("DNS query from {} (TCP): {}", client_addr, query_name);
+
+        let response = match tokio::time::timeout(
+            TCP_DNS_QUERY_TIMEOUT,
+            forward_tcp_dns_query(&upstream, &query),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                warn!("TCP DNS query for {} failed: {:#}", query_name, e);
+                return Ok(());
+            }
+            Err(_) => {
+                warn!("TCP DNS query for {} timed out", query_name);
+                return Ok(());
+            }
+        };
+        if response.len() < 12 || response.len() > u16::MAX as usize {
+            anyhow::bail!("invalid upstream response length {}", response.len());
+        }
+
+        // Parse A/AAAA records and populate the shared table
+        let resolved_ips = parse_ip_records(&response);
+        if let Some(ref ips) = resolved_ips {
+            let ttl = table_ttl(&response);
+            for ip in ips {
+                debug!("DNS resolved: {} -> {} (TCP)", query_name, ip);
+                table.insert(*ip, query_name.clone(), ttl);
+            }
+        }
+
+        info!(
+            "DNS response (TCP): {} -> {} (client={})",
+            query_name,
+            resolved_ips
+                .as_ref()
+                .map(|ips| ips
+                    .iter()
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","))
+                .unwrap_or_else(|| "no A/AAAA records".into()),
+            client_addr
+        );
+
+        stream
+            .write_all(&(response.len() as u16).to_be_bytes())
+            .await
+            .context("failed to write response length")?;
+        stream
+            .write_all(&response)
+            .await
+            .context("failed to write response body")?;
+    }
+}
+
+/// Forward a single DNS query upstream for the TCP listener.
+async fn forward_tcp_dns_query(upstream: &TcpDnsUpstream, query: &[u8]) -> Result<Vec<u8>> {
     match upstream {
-        DnsUpstream::Udp(addr) => run_udp(listen_addr, addr, table).await,
-        DnsUpstream::Https(url) => run_doh(listen_addr, url, table, upstream_proxy).await,
+        TcpDnsUpstream::Tcp(addr) => {
+            let mut conn = TcpStream::connect(addr)
+                .await
+                .with_context(|| format!("failed to connect to upstream DNS {addr} over TCP"))?;
+            conn.write_all(&(query.len() as u16).to_be_bytes())
+                .await
+                .context("failed to send query length upstream")?;
+            conn.write_all(query)
+                .await
+                .context("failed to send query upstream")?;
+
+            let mut len_buf = [0u8; 2];
+            conn.read_exact(&mut len_buf)
+                .await
+                .context("failed to read upstream response length")?;
+            let len = u16::from_be_bytes(len_buf) as usize;
+            let mut response = vec![0u8; len];
+            conn.read_exact(&mut response)
+                .await
+                .context("failed to read upstream response body")?;
+            Ok(response)
+        }
+        TcpDnsUpstream::Doh { client, url } => doh_query(client, url, query).await,
     }
 }
 
@@ -1284,6 +1508,95 @@ mod tests {
         let resolved = table.lookup(&IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)));
         assert_eq!(resolved, Some("example.com".to_string()));
 
+        forwarder.abort();
+    }
+
+    /// Integration test: runs the TCP DNS listener with a fake TCP upstream,
+    /// sends a length-prefixed query, and verifies RFC 7766 framing round-trips
+    /// and the DNS table is populated.
+    #[tokio::test]
+    async fn test_dns_tcp_query_response_framing() {
+        // Fake upstream DNS server speaking TCP with 2-byte length prefixes
+        let fake_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_upstream_addr = fake_upstream.local_addr().unwrap();
+
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = fake_upstream.accept().await.unwrap();
+            let mut len_buf = [0u8; 2];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let len = u16::from_be_bytes(len_buf) as usize;
+            let mut query = vec![0u8; len];
+            stream.read_exact(&mut query).await.unwrap();
+            assert_eq!(parse_query_name(&query), Some("example.com".to_string()));
+
+            let mut response = build_dns_response("example.com", Ipv4Addr::new(93, 184, 216, 34));
+            // Preserve the client's transaction ID
+            response[0] = query[0];
+            response[1] = query[1];
+            stream
+                .write_all(&(response.len() as u16).to_be_bytes())
+                .await
+                .unwrap();
+            stream.write_all(&response).await.unwrap();
+        });
+
+        // Pick an ephemeral port for the forwarder's TCP listener
+        let table = DnsTable::new();
+        let forwarder_table = table.clone();
+        let tmp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forwarder_addr = tmp.local_addr().unwrap();
+        drop(tmp);
+
+        let forwarder = tokio::spawn(async move {
+            let _ = run_tcp(
+                forwarder_addr,
+                TcpDnsUpstream::Tcp(fake_upstream_addr),
+                forwarder_table,
+            )
+            .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Client sends a length-prefixed query over TCP
+        let mut client = TcpStream::connect(forwarder_addr).await.unwrap();
+        let query = build_dns_query("example.com", 0x1234);
+        client
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        client.write_all(&query).await.unwrap();
+
+        // Read the length-prefixed response
+        let mut len_buf = [0u8; 2];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_exact(&mut len_buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let len = u16::from_be_bytes(len_buf) as usize;
+        let mut response = vec![0u8; len];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_exact(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Transaction ID preserved, answer parses
+        assert_eq!(response[0], 0x12);
+        assert_eq!(response[1], 0x34);
+        let ips = parse_ip_records(&response).unwrap();
+        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+
+        // The forwarder populated the shared table
+        let resolved = table.lookup(&IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)));
+        assert_eq!(resolved, Some("example.com".to_string()));
+
+        upstream_task.await.unwrap();
         forwarder.abort();
     }
 

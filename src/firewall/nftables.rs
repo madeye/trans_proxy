@@ -36,6 +36,51 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
     let port_str = config.proxy_port.to_string();
     let iface = &config.interface;
 
+    // DNS interception — must be added before the per-port / catch-all TCP
+    // redirect rules below: nftables NAT chains match in rule order and
+    // redirect/dnat verdicts are terminal, so a later TCP/53 dnat would
+    // never match.
+    if let Some((dns_ip, dns_port)) = config.dns_target_v4(addrs.ipv4) {
+        let dns_target = format!("{dns_ip}:{dns_port}");
+        println!("Adding DNS interception rules (UDP+TCP port 53 -> {dns_target})...");
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip",
+                "trans_proxy",
+                "prerouting",
+                "iifname",
+                iface,
+                "udp",
+                "dport",
+                "53",
+                "dnat",
+                "to",
+                &dns_target,
+            ],
+        )?;
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip",
+                "trans_proxy",
+                "prerouting",
+                "iifname",
+                iface,
+                "tcp",
+                "dport",
+                "53",
+                "dnat",
+                "to",
+                &dns_target,
+            ],
+        )?;
+    }
+
     if let Some(ref ports) = config.ports {
         for p in ports {
             let ps = p.to_string();
@@ -100,51 +145,6 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
                 &format!(":{port_str}"),
             ],
         )?;
-    }
-
-    // DNS interception
-    if config.dns {
-        if let Some(ip4) = addrs.ipv4 {
-            let ip_str = ip4.to_string();
-            let dns_target = format!("{ip_str}:53");
-            println!("Adding DNS interception rules (UDP+TCP port 53 -> {dns_target})...");
-            run_cmd(
-                "nft",
-                &[
-                    "add",
-                    "rule",
-                    "ip",
-                    "trans_proxy",
-                    "prerouting",
-                    "iifname",
-                    iface,
-                    "udp",
-                    "dport",
-                    "53",
-                    "dnat",
-                    "to",
-                    &dns_target,
-                ],
-            )?;
-            run_cmd(
-                "nft",
-                &[
-                    "add",
-                    "rule",
-                    "ip",
-                    "trans_proxy",
-                    "prerouting",
-                    "iifname",
-                    iface,
-                    "tcp",
-                    "dport",
-                    "53",
-                    "dnat",
-                    "to",
-                    &dns_target,
-                ],
-            )?;
-        }
     }
 
     // OUTPUT chain for local traffic interception
@@ -290,6 +290,50 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
         ],
     )?;
 
+    // DNS interception (IPv6) — must be added before the per-port / catch-all
+    // TCP redirect rules below (NAT verdicts are terminal, rules match in order).
+    if let Some((dns_ip, dns_port)) = config.dns_target_v6(addrs.ipv6) {
+        // nft requires brackets around an IPv6 address with a port
+        let dns_target = format!("[{dns_ip}]:{dns_port}");
+        println!("Adding IPv6 DNS interception rules (UDP+TCP port 53 -> {dns_target})...");
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip6",
+                "trans_proxy",
+                "prerouting",
+                "iifname",
+                iface,
+                "udp",
+                "dport",
+                "53",
+                "dnat",
+                "to",
+                &dns_target,
+            ],
+        )?;
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip6",
+                "trans_proxy",
+                "prerouting",
+                "iifname",
+                iface,
+                "tcp",
+                "dport",
+                "53",
+                "dnat",
+                "to",
+                &dns_target,
+            ],
+        )?;
+    }
+
     if let Some(ref ports) = config.ports {
         for p in ports {
             let ps = p.to_string();
@@ -353,51 +397,6 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
                 &format!(":{port_str}"),
             ],
         )?;
-    }
-
-    // DNS interception (IPv6)
-    if config.dns {
-        if let Some(ip6) = addrs.ipv6 {
-            let ip_str = ip6.to_string();
-            let dns_target = format!("{ip_str}:53");
-            println!("Adding IPv6 DNS interception rules (UDP+TCP port 53 -> [{ip_str}]:53)...");
-            run_cmd(
-                "nft",
-                &[
-                    "add",
-                    "rule",
-                    "ip6",
-                    "trans_proxy",
-                    "prerouting",
-                    "iifname",
-                    iface,
-                    "udp",
-                    "dport",
-                    "53",
-                    "dnat",
-                    "to",
-                    &dns_target,
-                ],
-            )?;
-            run_cmd(
-                "nft",
-                &[
-                    "add",
-                    "rule",
-                    "ip6",
-                    "trans_proxy",
-                    "prerouting",
-                    "iifname",
-                    iface,
-                    "tcp",
-                    "dport",
-                    "53",
-                    "dnat",
-                    "to",
-                    &dns_target,
-                ],
-            )?;
-        }
     }
 
     // OUTPUT chain for local traffic (IPv6)

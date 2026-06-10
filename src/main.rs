@@ -40,7 +40,7 @@
 //! - [`service`] — System service installation (launchd on macOS, systemd on Linux)
 //! - [`orig_dest`] — Original destination recovery (pf on macOS, SO_ORIGINAL_DST on Linux)
 //! - [`sni`] — TLS ClientHello SNI extraction
-//! - [`dns`] — DNS forwarder on gateway interface port 53 (UDP and DoH upstream)
+//! - [`dns`] — DNS forwarder on gateway interface port 53 (UDP + TCP listeners, UDP and DoH upstream)
 //! - [`tunnel`] — HTTP CONNECT / SOCKS5 tunnel establishment with loop prevention
 //! - [`proxy`] — TCP accept loop and per-connection handler
 //!
@@ -153,17 +153,18 @@ fn main() -> Result<()> {
     let result = rt.block_on(async {
         let dns_table = DnsTable::new();
 
-        if let Some(dns_listen) = config.resolve_dns_listen() {
+        let dns_task = if let Some(dns_listen) = config.resolve_dns_listen() {
             let table = dns_table.clone();
             let upstream = config.dns_upstream.clone();
             let upstream_proxy = config.upstream_proxy.clone();
-            tokio::spawn(async move {
-                if let Err(e) = dns::run(dns_listen, upstream, table, &upstream_proxy).await {
-                    tracing::error!("DNS forwarder failed: {:#}", e);
-                }
+            let handle = tokio::spawn(async move {
+                dns::run(dns_listen, upstream, table, &upstream_proxy).await
             });
             info!("DNS forwarder started on {}", dns_listen);
-        }
+            Some(handle)
+        } else {
+            None
+        };
 
         if config.gateway {
             let iface = config.interface.clone();
@@ -174,7 +175,22 @@ fn main() -> Result<()> {
             });
         }
 
-        proxy::run(config, dns_table).await
+        // The firewall redirects all LAN port-53 traffic to the DNS forwarder,
+        // so a dead forwarder silently blackholes DNS for every client. Treat
+        // forwarder exit as fatal so the service manager can restart us (and
+        // ExecStopPost / teardown can clean up the firewall rules).
+        if let Some(dns_task) = dns_task {
+            tokio::select! {
+                res = proxy::run(config, dns_table) => res,
+                res = dns_task => match res {
+                    Ok(Ok(())) => Err(anyhow::anyhow!("DNS forwarder exited unexpectedly")),
+                    Ok(Err(e)) => Err(e.context("DNS forwarder failed")),
+                    Err(e) => Err(anyhow::anyhow!("DNS forwarder task panicked: {e}")),
+                },
+            }
+        } else {
+            proxy::run(config, dns_table).await
+        }
     });
 
     // Cleanup PID file

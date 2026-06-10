@@ -29,6 +29,13 @@ RUN mkdir -p src e2e/src test_servers/src && \
 
 COPY . .
 
+# COPY preserves source mtimes from the build context, which are older than
+# the stub artifacts built in the dependency-caching layer above — cargo
+# would consider the stub binaries fresh and skip rebuilding them, shipping
+# no-op stubs for trans_proxy/e2e/test_servers. Touch the sources to force a
+# real rebuild.
+RUN find src e2e/src test_servers/src -name '*.rs' -exec touch {} +
+
 RUN cargo build --release --workspace
 RUN cargo test --release --workspace
 
