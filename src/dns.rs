@@ -24,6 +24,16 @@
 //!   `application/dns-message`
 //! - **UDP** (e.g., `8.8.8.8:53`): Traditional DNS over UDP
 //!
+//! # UDP hardening
+//!
+//! In UDP mode, each upstream query is sent with a fresh random transaction
+//! ID (rewritten back to the client's original ID before replying), and an
+//! upstream packet is only accepted if its QR bit is set and its question
+//! name/type match the pending query for that ID. This mitigates off-path
+//! response spoofing and prevents the IP→domain table from being poisoned
+//! with mismatched names. Pending queries expire after
+//! [`PENDING_QUERY_TTL`] and the map is capped at [`MAX_PENDING_QUERIES`].
+//!
 //! # Cache
 //!
 //! The lookup table is capped at [`MAX_CACHE_ENTRIES`] (10,000). Each entry
@@ -48,7 +58,14 @@ use tracing::{debug, info, warn};
 use crate::config::{DnsUpstream, ProxyAuth, ProxyProtocol, UpstreamProxy};
 
 const MAX_DNS_PACKET: usize = 1500;
+/// Maximum DNS message size over UDP (EDNS0 responses can far exceed 1500
+/// bytes; recv() silently truncates anything larger than the buffer).
+const MAX_UDP_DNS_PACKET: usize = 65_535;
 const MAX_CACHE_ENTRIES: usize = 10_000;
+/// How long an unanswered upstream query stays in the pending map.
+const PENDING_QUERY_TTL: Duration = Duration::from_secs(5);
+/// Hard cap on outstanding upstream queries (oldest evicted when full).
+const MAX_PENDING_QUERIES: usize = 4096;
 const MIN_TTL: u32 = 30;
 const MAX_TTL: u32 = 3600;
 
@@ -362,6 +379,68 @@ pub async fn run(
     }
 }
 
+/// A client query awaiting its upstream response, keyed by the random
+/// transaction ID we assigned to the upstream query.
+struct PendingQuery {
+    client_addr: SocketAddr,
+    /// The client's original transaction ID, restored before replying.
+    client_tx_id: u16,
+    /// Query name, used to validate the response's question section.
+    name: String,
+    /// Query type (QTYPE), used to validate the response's question section.
+    qtype: u16,
+    created: Instant,
+}
+
+/// Insert a pending query under a fresh random upstream transaction ID.
+///
+/// Expired entries are swept opportunistically on every insert, and the map
+/// is capped at [`MAX_PENDING_QUERIES`] (evicting the oldest entries when
+/// full). Returns the assigned upstream transaction ID, or `None` if a free
+/// ID could not be found.
+fn pending_insert(
+    map: &mut HashMap<u16, PendingQuery>,
+    entry: PendingQuery,
+    now: Instant,
+) -> Option<u16> {
+    // Sweep entries whose upstream response never arrived
+    map.retain(|_, p| now.duration_since(p.created) < PENDING_QUERY_TTL);
+
+    // Enforce the hard cap: evict the oldest entries to make room
+    while map.len() >= MAX_PENDING_QUERIES {
+        let oldest = map.iter().min_by_key(|(_, p)| p.created).map(|(k, _)| *k)?;
+        map.remove(&oldest);
+    }
+
+    // Pick a random unused transaction ID — the map holds at most 4096 of
+    // 65536 possible IDs, so a free one is found almost immediately
+    for _ in 0..64 {
+        let id: u16 = rand::random();
+        if let std::collections::hash_map::Entry::Vacant(slot) = map.entry(id) {
+            slot.insert(entry);
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Remove and return the pending query for `tx_id`, but only if the
+/// response's question name (case-insensitive) and type match the stored
+/// query. A mismatch leaves the entry in place so the genuine response can
+/// still be matched later.
+fn pending_take_match(
+    map: &mut HashMap<u16, PendingQuery>,
+    tx_id: u16,
+    resp_name: &str,
+    resp_qtype: u16,
+) -> Option<PendingQuery> {
+    let entry = map.get(&tx_id)?;
+    if !entry.name.eq_ignore_ascii_case(resp_name) || entry.qtype != resp_qtype {
+        return None;
+    }
+    map.remove(&tx_id)
+}
+
 /// Run the DNS forwarder with a traditional UDP upstream.
 async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTable) -> Result<()> {
     let socket = UdpSocket::bind(listen_addr).await.map_err(|e| {
@@ -384,9 +463,8 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
         .context("Failed to bind upstream DNS socket")?;
     upstream_socket.connect(upstream_dns).await?;
 
-    // Track pending queries: (transaction_id, client_addr) → query_name
-    let pending: Arc<RwLock<HashMap<(u16, SocketAddr), String>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+    // Track pending queries: random upstream transaction ID → original query
+    let pending: Arc<RwLock<HashMap<u16, PendingQuery>>> = Arc::new(RwLock::new(HashMap::new()));
 
     let socket = Arc::new(socket);
     let upstream_socket = Arc::new(upstream_socket);
@@ -398,7 +476,7 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
     let resp_table = table.clone();
 
     let _upstream_reader = tokio::spawn(async move {
-        let mut buf = vec![0u8; MAX_DNS_PACKET];
+        let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
         loop {
             let n = match resp_upstream.recv(&mut buf).await {
                 Ok(n) => n,
@@ -408,50 +486,55 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
                 }
             };
 
-            let packet = &buf[..n];
-
-            // Extract transaction ID
-            if packet.len() < 12 {
+            if n < 12 {
                 continue;
             }
-            let tx_id = u16::from_be_bytes([packet[0], packet[1]]);
 
-            // Look up the original client(s) for this transaction ID
-            let clients: Vec<(SocketAddr, String)> = {
+            // Only accept actual responses (QR bit set)
+            if buf[2] & 0x80 == 0 {
+                continue;
+            }
+
+            let tx_id = u16::from_be_bytes([buf[0], buf[1]]);
+
+            // Parse the question section from the response itself; it must
+            // match the pending query before we trust the packet
+            let resp_name = match parse_query_name(&buf[..n]) {
+                Some(name) => name,
+                None => continue,
+            };
+            let resp_qtype = parse_query_type(&buf[..n]).unwrap_or(0);
+
+            // Look up the original client for this transaction ID
+            let entry = {
                 let mut map = match resp_pending.write() {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                // Collect all entries matching this tx_id (multiple clients may share the same ID)
-                let matching_keys: Vec<(u16, SocketAddr)> =
-                    map.keys().filter(|(id, _)| *id == tx_id).copied().collect();
-                matching_keys
-                    .into_iter()
-                    .filter_map(|key| map.remove(&key).map(|name| (key.1, name)))
-                    .collect()
+                pending_take_match(&mut map, tx_id, &resp_name, resp_qtype)
+            };
+            let Some(entry) = entry else {
+                debug!(
+                    "DNS: dropping unmatched response for {} (tx_id=0x{:04x})",
+                    resp_name, tx_id
+                );
+                continue;
             };
 
-            if clients.is_empty() {
-                continue;
-            }
-
-            // Use the query name from the first client (they all queried the same name for this tx_id response)
-            let query_name = &clients[0].1;
-
-            // Parse A records from the response and populate the table
-            let resolved_ips = parse_ip_records(packet);
+            // Parse A records from the response and populate the table,
+            // using the name parsed from the response itself
+            let resolved_ips = parse_ip_records(&buf[..n]);
             if let Some(ref ips) = resolved_ips {
-                let ttl = table_ttl(packet);
+                let ttl = table_ttl(&buf[..n]);
                 for ip in ips {
-                    debug!("DNS resolved: {} -> {}", query_name, ip);
-                    resp_table.insert(*ip, query_name.clone(), ttl);
+                    debug!("DNS resolved: {} -> {}", resp_name, ip);
+                    resp_table.insert(*ip, resp_name.clone(), ttl);
                 }
             }
 
-            let client_addrs: Vec<_> = clients.iter().map(|(addr, _)| addr.to_string()).collect();
             info!(
-                "DNS response: {} -> {} (tx_id=0x{:04x}, clients={})",
-                query_name,
+                "DNS response: {} -> {} (tx_id=0x{:04x}, client={})",
+                resp_name,
                 resolved_ips
                     .as_ref()
                     .map(|ips| ips
@@ -461,45 +544,66 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
                         .join(","))
                     .unwrap_or_else(|| "no A/AAAA records".into()),
                 tx_id,
-                client_addrs.join(",")
+                entry.client_addr
             );
 
-            // Forward response back to all matching clients
-            for (client_addr, _) in &clients {
-                if let Err(e) = resp_socket.send_to(packet, client_addr).await {
-                    warn!("DNS: failed to send response to {}: {}", client_addr, e);
-                }
+            // Restore the client's original transaction ID and reply
+            buf[..2].copy_from_slice(&entry.client_tx_id.to_be_bytes());
+            if let Err(e) = resp_socket.send_to(&buf[..n], entry.client_addr).await {
+                warn!(
+                    "DNS: failed to send response to {}: {}",
+                    entry.client_addr, e
+                );
             }
         }
     });
 
     // Main loop: read queries from clients, forward to upstream
-    let mut buf = vec![0u8; MAX_DNS_PACKET];
+    let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
     loop {
         let (n, client_addr) = socket.recv_from(&mut buf).await?;
-        let packet = &buf[..n];
 
-        if packet.len() < 12 {
+        if n < 12 {
             continue;
         }
 
-        let tx_id = u16::from_be_bytes([packet[0], packet[1]]);
+        let client_tx_id = u16::from_be_bytes([buf[0], buf[1]]);
 
-        // Extract the query name for later use
-        let query_name = parse_query_name(packet).unwrap_or_default();
+        // Extract the query name and type for response validation
+        let query_name = parse_query_name(&buf[..n]).unwrap_or_default();
+        let qtype = parse_query_type(&buf[..n]).unwrap_or(0);
 
         debug!(
             "DNS query from {}: {} (tx_id=0x{:04x})",
-            client_addr, query_name, tx_id
+            client_addr, query_name, client_tx_id
         );
 
-        // Store pending query keyed by (tx_id, client_addr) to avoid collisions
-        if let Ok(mut map) = pending.write() {
-            map.insert((tx_id, client_addr), query_name);
-        }
+        // Store the pending query under a fresh random upstream transaction
+        // ID so off-path attackers can't predict it from the client's ID
+        let upstream_tx_id = {
+            let entry = PendingQuery {
+                client_addr,
+                client_tx_id,
+                name: query_name,
+                qtype,
+                created: Instant::now(),
+            };
+            match pending.write() {
+                Ok(mut map) => pending_insert(&mut map, entry, Instant::now()),
+                Err(_) => continue,
+            }
+        };
+        let Some(upstream_tx_id) = upstream_tx_id else {
+            warn!(
+                "DNS: pending query map full, dropping query from {}",
+                client_addr
+            );
+            continue;
+        };
 
-        // Forward to upstream
-        if let Err(e) = upstream_socket.send(packet).await {
+        // Rewrite the transaction ID and forward to upstream
+        buf[..2].copy_from_slice(&upstream_tx_id.to_be_bytes());
+        if let Err(e) = upstream_socket.send(&buf[..n]).await {
             warn!("DNS: failed to forward query to upstream: {}", e);
         }
     }
@@ -1146,7 +1250,7 @@ mod tests {
         client_socket.send_to(&query, forwarder_addr).await.unwrap();
 
         // Fake upstream receives the forwarded query
-        let mut buf = vec![0u8; MAX_DNS_PACKET];
+        let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
         let (n, from_addr) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fake_upstream.recv_from(&mut buf),
@@ -1159,11 +1263,12 @@ mod tests {
         assert!(n >= 12);
         assert_eq!(parse_query_name(&buf[..n]), Some("example.com".to_string()));
 
-        // Send a fake response back
-        let response = build_dns_response("example.com", Ipv4Addr::new(93, 184, 216, 34));
+        // Send a fake response back, echoing the (randomized) upstream tx_id
+        let mut response = build_dns_response("example.com", Ipv4Addr::new(93, 184, 216, 34));
+        response[..2].copy_from_slice(&buf[..2]);
         fake_upstream.send_to(&response, from_addr).await.unwrap();
 
-        // Client should receive the response
+        // Client should receive the response with its original tx_id restored
         let (n, _) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client_socket.recv_from(&mut buf),
@@ -1172,6 +1277,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(n >= 12);
+        assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 0xABCD);
 
         // Verify the DNS table was populated (proves the info!/debug! code paths ran)
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1179,5 +1285,82 @@ mod tests {
         assert_eq!(resolved, Some("example.com".to_string()));
 
         forwarder.abort();
+    }
+
+    fn make_pending(name: &str, qtype: u16, created: Instant) -> PendingQuery {
+        PendingQuery {
+            client_addr: "127.0.0.1:5353".parse().unwrap(),
+            client_tx_id: 0xABCD,
+            name: name.to_string(),
+            qtype,
+            created,
+        }
+    }
+
+    #[test]
+    fn test_pending_take_match_rejects_wrong_name_and_qtype() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        let tx_id =
+            pending_insert(&mut map, make_pending("example.com", DNS_TYPE_A, now), now).unwrap();
+
+        // Wrong name: rejected, entry stays pending for the real response
+        assert!(pending_take_match(&mut map, tx_id, "evil.com", DNS_TYPE_A).is_none());
+        assert_eq!(map.len(), 1);
+
+        // Wrong qtype: rejected
+        assert!(pending_take_match(&mut map, tx_id, "example.com", DNS_TYPE_AAAA).is_none());
+        assert_eq!(map.len(), 1);
+
+        // Unknown tx_id: rejected
+        assert!(
+            pending_take_match(&mut map, tx_id.wrapping_add(1), "example.com", DNS_TYPE_A)
+                .is_none()
+        );
+        assert_eq!(map.len(), 1);
+
+        // Matching name (case-insensitive) and qtype: accepted and removed
+        let entry = pending_take_match(&mut map, tx_id, "EXAMPLE.Com", DNS_TYPE_A).unwrap();
+        assert_eq!(entry.client_tx_id, 0xABCD);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_pending_insert_expires_stale_entries() {
+        let mut map = HashMap::new();
+        let t0 = Instant::now();
+        let later = t0 + PENDING_QUERY_TTL + Duration::from_secs(1);
+
+        pending_insert(&mut map, make_pending("a.com", DNS_TYPE_A, t0), t0).unwrap();
+        assert_eq!(map.len(), 1);
+
+        // After the TTL, the stale entry is swept when a new query arrives
+        pending_insert(&mut map, make_pending("b.com", DNS_TYPE_A, later), later).unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.values().all(|p| p.name == "b.com"));
+    }
+
+    #[test]
+    fn test_pending_insert_enforces_cap() {
+        let mut map = HashMap::new();
+        let base = Instant::now();
+
+        // Fill the map with fresh entries up to the cap; "0.com" is oldest
+        for i in 0..MAX_PENDING_QUERIES {
+            let created = base + Duration::from_millis(i as u64);
+            pending_insert(
+                &mut map,
+                make_pending(&format!("{}.com", i), DNS_TYPE_A, created),
+                base,
+            )
+            .unwrap();
+        }
+        assert_eq!(map.len(), MAX_PENDING_QUERIES);
+
+        // The next insert evicts the oldest entry instead of growing the map
+        pending_insert(&mut map, make_pending("new.com", DNS_TYPE_A, base), base).unwrap();
+        assert_eq!(map.len(), MAX_PENDING_QUERIES);
+        assert!(map.values().all(|p| p.name != "0.com"));
+        assert!(map.values().any(|p| p.name == "new.com"));
     }
 }
