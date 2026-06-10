@@ -26,9 +26,14 @@
 //!
 //! # Cache
 //!
-//! The lookup table is capped at [`MAX_CACHE_ENTRIES`] (10,000). When full,
-//! half the entries are evicted. Entries are not TTL-aware — they persist
-//! until evicted or overwritten by a newer response.
+//! The lookup table is capped at [`MAX_CACHE_ENTRIES`] (10,000). Each entry
+//! expires after the response's minimum TTL, clamped to
+//! [`TABLE_TTL_FLOOR`]..[`TABLE_TTL_CEIL`]; expired entries are skipped on
+//! lookup. When the table is full, expired entries are evicted first, then
+//! half the remaining entries as a fallback.
+//!
+//! The DoH response cache is TTL-aware as well: cached responses are replayed
+//! with the record TTLs decremented by the time spent in the cache.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -47,14 +52,24 @@ const MAX_CACHE_ENTRIES: usize = 10_000;
 const MIN_TTL: u32 = 30;
 const MAX_TTL: u32 = 3600;
 
+/// Floor for IP→domain table entry lifetimes. The proxy benefits from
+/// generous retention: clients often reuse a resolved IP well past short
+/// CDN TTLs (e.g. 30s), and a stale-but-recent mapping is still the best
+/// hostname guess for an intercepted connection.
+const TABLE_TTL_FLOOR: u32 = 300;
+/// Ceiling for IP→domain table entry lifetimes (one day), bounding how long
+/// a mapping can outlive an IP reassignment.
+const TABLE_TTL_CEIL: u32 = 86_400;
+
 const DNS_TYPE_A: u16 = 1;
 const DNS_TYPE_AAAA: u16 = 28;
+const DNS_TYPE_OPT: u16 = 41;
 const DNS_CLASS_IN: u16 = 1;
 
 /// Shared IP→domain lookup table (supports both IPv4 and IPv6).
 #[derive(Clone)]
 pub struct DnsTable {
-    inner: Arc<RwLock<HashMap<IpAddr, String>>>,
+    inner: Arc<RwLock<HashMap<IpAddr, (String, Instant)>>>,
 }
 
 impl DnsTable {
@@ -65,28 +80,51 @@ impl DnsTable {
         }
     }
 
-    /// Look up a domain name for the given IP address.
+    /// Look up a domain name for the given IP address. Expired entries
+    /// return `None`.
     pub fn lookup(&self, ip: &IpAddr) -> Option<String> {
-        self.inner.read().ok()?.get(ip).cloned()
+        let map = self.inner.read().ok()?;
+        let (domain, expires) = map.get(ip)?;
+        if *expires <= Instant::now() {
+            return None;
+        }
+        Some(domain.clone())
     }
 
-    /// Insert an IP→domain mapping.
-    fn insert(&self, ip: IpAddr, domain: String) {
+    /// Insert an IP→domain mapping that expires after `ttl_secs`.
+    fn insert(&self, ip: IpAddr, domain: String, ttl_secs: u32) {
+        let expires = Instant::now() + Duration::from_secs(ttl_secs as u64);
         if let Ok(mut map) = self.inner.write() {
             if map.len() >= MAX_CACHE_ENTRIES {
-                let keys: Vec<_> = map.keys().take(MAX_CACHE_ENTRIES / 2).copied().collect();
-                for k in keys {
-                    map.remove(&k);
+                // Evict expired entries first
+                let now = Instant::now();
+                map.retain(|_, (_, exp)| *exp > now);
+                // If still full, fall back to dropping half
+                if map.len() >= MAX_CACHE_ENTRIES {
+                    let keys: Vec<_> = map.keys().take(MAX_CACHE_ENTRIES / 2).copied().collect();
+                    for k in keys {
+                        map.remove(&k);
+                    }
                 }
             }
-            map.insert(ip, domain);
+            map.insert(ip, (domain, expires));
         }
     }
+}
+
+/// Derive the table entry TTL from a DNS response: the minimum answer TTL,
+/// clamped to [`TABLE_TTL_FLOOR`]..[`TABLE_TTL_CEIL`], defaulting to the
+/// floor when no TTL can be extracted.
+fn table_ttl(response: &[u8]) -> u32 {
+    extract_min_ttl(response)
+        .unwrap_or(TABLE_TTL_FLOOR)
+        .clamp(TABLE_TTL_FLOOR, TABLE_TTL_CEIL)
 }
 
 /// Cached DNS response with expiration.
 struct DnsCacheEntry {
     response: Vec<u8>,
+    inserted: Instant,
     expires: Instant,
 }
 
@@ -102,7 +140,8 @@ impl DnsCache {
         }
     }
 
-    /// Look up a cached response, returning it with the transaction ID rewritten.
+    /// Look up a cached response, returning it with the transaction ID
+    /// rewritten and record TTLs decremented by the time spent in the cache.
     fn get(&self, name: &str, tx_id: u16) -> Option<Vec<u8>> {
         let map = self.entries.read().ok()?;
         let entry = map.get(name)?;
@@ -116,6 +155,11 @@ impl DnsCache {
             resp[0] = id_bytes[0];
             resp[1] = id_bytes[1];
         }
+        // Decrement TTLs by the entry's age so clients don't over-cache
+        let elapsed = entry.inserted.elapsed().as_secs().min(u32::MAX as u64) as u32;
+        if elapsed > 0 {
+            let _ = rewrite_ttls(&mut resp, elapsed);
+        }
         Some(resp)
     }
 
@@ -124,9 +168,11 @@ impl DnsCache {
         let ttl = extract_min_ttl(response)
             .unwrap_or(MIN_TTL)
             .clamp(MIN_TTL, MAX_TTL);
+        let now = Instant::now();
         let entry = DnsCacheEntry {
             response: response.to_vec(),
-            expires: Instant::now() + Duration::from_secs(ttl as u64),
+            inserted: now,
+            expires: now + Duration::from_secs(ttl as u64),
         };
         if let Ok(mut map) = self.entries.write() {
             // Simple eviction when cache is full
@@ -194,6 +240,78 @@ fn extract_min_ttl(packet: &[u8]) -> Option<u32> {
     } else {
         Some(min_ttl)
     }
+}
+
+/// Rewrite the TTL of every resource record (answer, authority, additional)
+/// in a DNS response to `original_ttl - elapsed_secs`, floored at 1. OPT
+/// pseudo-records (EDNS) are skipped since their TTL field carries flags.
+fn rewrite_ttls(packet: &mut [u8], elapsed_secs: u32) -> Option<()> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let qdcount = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    let ancount = u16::from_be_bytes([packet[6], packet[7]]) as usize;
+    let nscount = u16::from_be_bytes([packet[8], packet[9]]) as usize;
+    let arcount = u16::from_be_bytes([packet[10], packet[11]]) as usize;
+
+    let mut pos = 12;
+    for _ in 0..qdcount {
+        pos = skip_dns_name(packet, pos)?;
+        pos += 4;
+        if pos > packet.len() {
+            return None;
+        }
+    }
+    for _ in 0..(ancount + nscount + arcount) {
+        pos = skip_dns_name(packet, pos)?;
+        if pos + 10 > packet.len() {
+            return None;
+        }
+        let rtype = u16::from_be_bytes([packet[pos], packet[pos + 1]]);
+        if rtype != DNS_TYPE_OPT {
+            let ttl = u32::from_be_bytes([
+                packet[pos + 4],
+                packet[pos + 5],
+                packet[pos + 6],
+                packet[pos + 7],
+            ]);
+            let new_ttl = ttl.saturating_sub(elapsed_secs).max(1);
+            packet[pos + 4..pos + 8].copy_from_slice(&new_ttl.to_be_bytes());
+        }
+        let rdlength = u16::from_be_bytes([packet[pos + 8], packet[pos + 9]]) as usize;
+        pos += 10 + rdlength;
+        if pos > packet.len() {
+            return None;
+        }
+    }
+    Some(())
+}
+
+/// Synthesize a minimal SERVFAIL response from a DNS query: same transaction
+/// ID, QR=1, RA=1, RCODE=2, question section echoed, all other sections empty.
+fn build_servfail(query: &[u8]) -> Option<Vec<u8>> {
+    if query.len() < 12 {
+        return None;
+    }
+    let qdcount = u16::from_be_bytes([query[4], query[5]]) as usize;
+    let mut pos = 12;
+    for _ in 0..qdcount {
+        pos = skip_dns_name(query, pos)?;
+        pos += 4;
+        if pos > query.len() {
+            return None;
+        }
+    }
+    let mut resp = Vec::with_capacity(pos);
+    resp.extend_from_slice(&query[..12]);
+    // QR=1; preserve opcode and RD; clear AA/TC
+    resp[2] = 0x80 | (query[2] & 0x79);
+    // RA=1, RCODE=2 (SERVFAIL)
+    resp[3] = 0x82;
+    // ANCOUNT = NSCOUNT = ARCOUNT = 0 (question count preserved)
+    resp[6..12].fill(0);
+    resp.extend_from_slice(&query[12..pos]);
+    Some(resp)
 }
 
 /// In-flight query coalescer: deduplicates concurrent DoH queries for the same domain.
@@ -323,9 +441,10 @@ async fn run_udp(listen_addr: SocketAddr, upstream_dns: SocketAddr, table: DnsTa
             // Parse A records from the response and populate the table
             let resolved_ips = parse_ip_records(packet);
             if let Some(ref ips) = resolved_ips {
+                let ttl = table_ttl(packet);
                 for ip in ips {
                     debug!("DNS resolved: {} -> {}", query_name, ip);
-                    resp_table.insert(*ip, query_name.clone());
+                    resp_table.insert(*ip, query_name.clone(), ttl);
                 }
             }
 
@@ -426,6 +545,8 @@ async fn run_doh(
         .proxy(proxy)
         .pool_max_idle_per_host(2)
         .pool_idle_timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
         .build()
         .context("Failed to build HTTP client for DoH")?;
     info!(
@@ -456,8 +577,9 @@ async fn run_doh(
             // Still populate the DNS table from cached response
             let resolved_ips = parse_ip_records(&cached);
             if let Some(ref ips) = resolved_ips {
+                let ttl = table_ttl(&cached);
                 for ip in ips {
-                    table.insert(*ip, query_name.clone());
+                    table.insert(*ip, query_name.clone(), ttl);
                 }
             }
             info!(
@@ -498,8 +620,9 @@ async fn run_doh(
                         }
                         let resolved_ips = parse_ip_records(&resp);
                         if let Some(ref ips) = resolved_ips {
+                            let ttl = table_ttl(&resp);
                             for ip in ips {
-                                table.insert(*ip, query_name.clone());
+                                table.insert(*ip, query_name.clone(), ttl);
                             }
                         }
                         if let Err(e) = socket.send_to(&resp, client_addr).await {
@@ -538,12 +661,19 @@ async fn run_doh(
                         cache.put(&ckey_owned, &response);
                     }
 
-                    let _ = tx.send(response.clone());
+                    // Remove the in-flight entry BEFORE broadcasting: a
+                    // tokio broadcast receiver only sees messages sent after
+                    // subscribe(), so a subscriber joining after send() but
+                    // before complete() would wait on a spent sender forever.
+                    // After removal, late queries fall through to the cache
+                    // or issue their own DoH request.
                     coalescer.complete(&ckey_owned);
+                    let _ = tx.send(response.clone());
                     if let Some(ref ips) = resolved_ips {
+                        let ttl = table_ttl(&response);
                         for ip in ips {
                             debug!("DNS resolved: {} -> {} (DoH)", query_name_owned, ip);
-                            table.insert(*ip, query_name_owned.clone());
+                            table.insert(*ip, query_name_owned.clone(), ttl);
                         }
                     }
 
@@ -569,6 +699,14 @@ async fn run_doh(
                 Err(e) => {
                     coalescer.complete(&ckey_owned);
                     warn!("DoH query for {} failed: {:#}", query_name_owned, e);
+                    // Synthesize a SERVFAIL so the client fails fast instead
+                    // of blocking for its full stub timeout and retrying.
+                    if let Some(servfail) = build_servfail(&packet) {
+                        let _ = tx.send(servfail.clone());
+                        if let Err(e) = socket.send_to(&servfail, client_addr).await {
+                            warn!("DNS: failed to send SERVFAIL to {}: {}", client_addr, e);
+                        }
+                    }
                 }
             }
         });
@@ -887,6 +1025,88 @@ mod tests {
         let pkt = build_dns_response("example.com", Ipv4Addr::new(1, 2, 3, 4));
         // Our test builder uses TTL=60
         assert_eq!(extract_min_ttl(&pkt), Some(60));
+    }
+
+    #[test]
+    fn test_rewrite_ttls_decrements() {
+        let mut pkt = build_dns_response("example.com", Ipv4Addr::new(1, 2, 3, 4));
+        rewrite_ttls(&mut pkt, 10).unwrap();
+        assert_eq!(extract_min_ttl(&pkt), Some(50));
+        // Records must still parse after the rewrite
+        assert!(parse_ip_records(&pkt).is_some());
+    }
+
+    #[test]
+    fn test_rewrite_ttls_floors_at_one() {
+        let mut pkt = build_dns_response("example.com", Ipv4Addr::new(1, 2, 3, 4));
+        rewrite_ttls(&mut pkt, 9999).unwrap();
+        assert_eq!(extract_min_ttl(&pkt), Some(1));
+    }
+
+    #[test]
+    fn test_dns_cache_get_rewrites_ttl_by_age() {
+        let cache = DnsCache::new();
+        let pkt = build_dns_response("example.com", Ipv4Addr::new(1, 2, 3, 4));
+        // Insert an entry backdated by 20 seconds
+        let now = Instant::now();
+        cache.entries.write().unwrap().insert(
+            "example.com".to_string(),
+            DnsCacheEntry {
+                response: pkt,
+                inserted: now - Duration::from_secs(20),
+                expires: now + Duration::from_secs(40),
+            },
+        );
+        let cached = cache.get("example.com", 0x1234).unwrap();
+        // Original TTL=60, 20s elapsed → 40 (allow 1s of test slack)
+        let ttl = extract_min_ttl(&cached).unwrap();
+        assert!((39..=40).contains(&ttl), "ttl was {}", ttl);
+    }
+
+    #[test]
+    fn test_build_servfail() {
+        let query = build_dns_query("example.com", 0xBEEF);
+        let resp = build_servfail(&query).unwrap();
+        // Same transaction ID
+        assert_eq!(&resp[0..2], &0xBEEFu16.to_be_bytes());
+        // QR=1, RD preserved
+        assert_eq!(resp[2] & 0x80, 0x80);
+        assert_eq!(resp[2] & 0x01, query[2] & 0x01);
+        // RA=1, RCODE=2 (SERVFAIL)
+        assert_eq!(resp[3], 0x82);
+        // Question echoed, no answers
+        assert_eq!(u16::from_be_bytes([resp[4], resp[5]]), 1);
+        assert_eq!(&resp[6..12], &[0u8; 6]);
+        assert_eq!(parse_query_name(&resp), Some("example.com".to_string()));
+        assert_eq!(resp.len(), query.len());
+    }
+
+    #[test]
+    fn test_build_servfail_rejects_short_packet() {
+        assert!(build_servfail(&[0u8; 11]).is_none());
+    }
+
+    #[test]
+    fn test_dns_table_entry_expiry() {
+        let table = DnsTable::new();
+        let fresh = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let expired = IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2));
+
+        table.insert(fresh, "fresh.example".to_string(), 300);
+        // TTL of 0 expires immediately
+        table.insert(expired, "expired.example".to_string(), 0);
+
+        assert_eq!(table.lookup(&fresh), Some("fresh.example".to_string()));
+        assert_eq!(table.lookup(&expired), None);
+    }
+
+    #[test]
+    fn test_table_ttl_clamping() {
+        // TTL=60 in the test response is below the floor → clamped up
+        let pkt = build_dns_response("example.com", Ipv4Addr::new(1, 2, 3, 4));
+        assert_eq!(table_ttl(&pkt), TABLE_TTL_FLOOR);
+        // No answers → default to the floor
+        assert_eq!(table_ttl(&[0u8; 12]), TABLE_TTL_FLOOR);
     }
 
     /// Integration test: runs the UDP DNS forwarder with a fake upstream,
