@@ -11,11 +11,12 @@
 //! Handles both forwarded LAN traffic and locally-originated traffic
 //! (when `--local-traffic` is enabled).
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::io::{copy_bidirectional_with_sizes, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
@@ -37,6 +38,12 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Per-direction relay buffer size (tokio's 8 KB default costs ~8x more
 /// syscalls per MB on bulk transfers).
 const RELAY_BUF_SIZE: usize = 64 * 1024;
+
+/// After one side of the relay reaches EOF, the remaining direction has this
+/// long to flush buffered data before the connection is forcibly closed.
+/// Prevents CLOSE-WAIT / FIN-WAIT-2 fd leaks when the upstream proxy doesn't
+/// close its side of the tunnel in a timely manner.
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(30);
 
 /// Run the transparent proxy accept loop.
 pub async fn run(config: Config, dns_table: DnsTable) -> Result<()> {
@@ -178,12 +185,82 @@ async fn handle_connection(
     }
 
     let (client_bytes, server_bytes) =
-        copy_bidirectional_with_sizes(&mut inbound, &mut outbound, RELAY_BUF_SIZE, RELAY_BUF_SIZE)
-            .await?;
+        relay_with_shutdown(&mut inbound, &mut outbound, RELAY_BUF_SIZE).await?;
     info!(
         "{} -> {} [closed] tx={} rx={}",
         client_addr, dest_display, client_bytes, server_bytes
     );
 
     Ok(())
+}
+
+/// Bidirectional relay with graceful shutdown.
+///
+/// When either side reaches EOF, the other side's write half is shut down.
+/// If the remaining direction doesn't complete within
+/// [`SHUTDOWN_GRACE_PERIOD`], the connection is forcibly closed to prevent
+/// CLOSE-WAIT / FIN-WAIT-2 fd leaks.
+async fn relay_with_shutdown(
+    inbound: &mut TcpStream,
+    outbound: &mut TcpStream,
+    buf_size: usize,
+) -> io::Result<(u64, u64)> {
+    let (mut ri, mut wi) = inbound.split();
+    let (mut ro, mut wo) = outbound.split();
+
+    let mut client_bytes = 0u64;
+    let mut server_bytes = 0u64;
+    let mut client_eof = false;
+    let mut server_eof = false;
+
+    let mut cbuf = vec![0u8; buf_size];
+    let mut sbuf = vec![0u8; buf_size];
+
+    loop {
+        if client_eof && server_eof {
+            break;
+        }
+
+        tokio::select! {
+            // Client -> Upstream
+            result = ri.read(&mut cbuf), if !client_eof => {
+                match result? {
+                    0 => {
+                        client_eof = true;
+                        let _ = wo.shutdown().await;
+                    }
+                    n => {
+                        wo.write_all(&cbuf[..n]).await?;
+                        client_bytes += n as u64;
+                    }
+                }
+            }
+            // Upstream -> Client
+            result = ro.read(&mut sbuf), if !server_eof => {
+                match result? {
+                    0 => {
+                        server_eof = true;
+                        let _ = wi.shutdown().await;
+                    }
+                    n => {
+                        wi.write_all(&sbuf[..n]).await?;
+                        server_bytes += n as u64;
+                    }
+                }
+            }
+            // Grace period: one side closed, the other hasn't finished flushing
+            _ = tokio::time::sleep(SHUTDOWN_GRACE_PERIOD), if (client_eof || server_eof) && !(client_eof && server_eof) => {
+                if !client_eof {
+                    let _ = wo.shutdown().await;
+                    client_eof = true;
+                }
+                if !server_eof {
+                    let _ = wi.shutdown().await;
+                    server_eof = true;
+                }
+            }
+        }
+    }
+
+    Ok((client_bytes, server_bytes))
 }
