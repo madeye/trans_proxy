@@ -208,6 +208,7 @@ Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+LimitNOFILE=65536
 ProtectSystem=false
 PrivateTmp=false
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
