@@ -222,6 +222,25 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
             )?;
         }
 
+        // Do not redirect locally-originated connections that are already
+        // addressed to this host; otherwise --local-traffic breaks local
+        // services such as 127.0.0.1:<port> or the gateway's own LAN IPs.
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip",
+                "trans_proxy",
+                "output",
+                "fib",
+                "daddr",
+                "type",
+                "local",
+                "return",
+            ],
+        )?;
+
         if let Some(ref ports) = config.ports {
             for p in ports {
                 let ps = p.to_string();
@@ -492,6 +511,25 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
                 ])
                 .status();
         }
+
+        // Do not redirect locally-originated connections that are already
+        // addressed to this host; otherwise --local-traffic breaks local
+        // services such as ::1:<port> or the gateway's own LAN IPs.
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "ip6",
+                "trans_proxy",
+                "output",
+                "fib",
+                "daddr",
+                "type",
+                "local",
+                "return",
+            ],
+        )?;
 
         if let Some(ref ports) = config.ports {
             for p in ports {
