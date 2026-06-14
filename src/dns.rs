@@ -1876,6 +1876,63 @@ mod tests {
         forwarder.abort();
     }
 
+    #[tokio::test]
+    async fn test_dns_udp_ipv6_upstream() {
+        let fake_upstream = UdpSocket::bind("[::1]:0").await.unwrap();
+        let fake_upstream_addr = fake_upstream.local_addr().unwrap();
+
+        let table = DnsTable::new();
+        let forwarder_table = table.clone();
+        let listen_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let forwarder_addr = listen_socket.local_addr().unwrap();
+        drop(listen_socket);
+
+        let forwarder = tokio::spawn(async move {
+            let _ = run_udp(forwarder_addr, fake_upstream_addr, forwarder_table, false).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let query = build_dns_query("example.com", 0xCAFE);
+        client_socket.send_to(&query, forwarder_addr).await.unwrap();
+
+        let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
+        let (n, from_addr) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fake_upstream.recv_from(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(parse_query_name(&buf[..n]), Some("example.com".to_string()));
+
+        let mut response = build_dns_response("example.com", Ipv4Addr::new(93, 184, 216, 34));
+        response[..2].copy_from_slice(&buf[..2]);
+        fake_upstream.send_to(&response, from_addr).await.unwrap();
+
+        let (n, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client_socket.recv_from(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 0xCAFE);
+        assert_eq!(
+            parse_ip_records(&buf[..n]).unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            table.lookup(&IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))),
+            Some("example.com".to_string())
+        );
+
+        forwarder.abort();
+    }
+
     /// Integration test: runs the TCP DNS listener with a fake TCP upstream,
     /// sends a length-prefixed query, and verifies RFC 7766 framing round-trips
     /// and the DNS table is populated.
