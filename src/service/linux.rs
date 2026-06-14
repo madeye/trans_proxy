@@ -176,6 +176,7 @@ fn generate_unit(args: &[String]) -> String {
         "--interface",
         "--listen-addr",
         "--upstream-proxy",
+        "--dns-listen",
         "--ports",
         "--fwmark",
     ] {
@@ -349,6 +350,24 @@ mod tests {
         let unit = generate_unit(&args);
 
         assert!(unit.contains("--ports 22,80,443"));
+    }
+
+    #[test]
+    fn test_generate_unit_forwards_dns_listen_to_firewall_setup() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--dns".into(),
+            "--dns-listen=127.0.0.1:5353".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        assert!(unit.contains(
+            "ExecStart=/usr/local/bin/trans_proxy --upstream-proxy 127.0.0.1:1082 --dns --dns-listen=127.0.0.1:5353"
+        ));
+        assert!(unit.contains(
+            "ExecStartPre=/usr/local/bin/trans_proxy --setup-firewall --upstream-proxy 127.0.0.1:1082 --dns-listen 127.0.0.1:5353 --dns"
+        ));
     }
 
     #[test]
