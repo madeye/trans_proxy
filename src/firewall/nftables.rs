@@ -1,6 +1,13 @@
 use anyhow::Result;
+use std::net::{IpAddr, SocketAddr};
 
 use super::{get_interface_ips, run_cmd, run_cmd_ignore, FirewallConfig};
+
+#[derive(Clone, Copy)]
+enum NftFamily {
+    Ip,
+    Ip6,
+}
 
 pub fn setup(config: &FirewallConfig) -> Result<()> {
     // Remove existing tables for idempotent setup
@@ -200,26 +207,10 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
         )?;
 
         if let Some(upstream) = config.upstream_addr {
-            let up_ip = upstream.ip().to_string();
-            let up_port = upstream.port().to_string();
-            println!("  Excluding upstream proxy destination {upstream}...");
-            run_cmd(
-                "nft",
-                &[
-                    "add",
-                    "rule",
-                    "ip",
-                    "trans_proxy",
-                    "output",
-                    "ip",
-                    "daddr",
-                    &up_ip,
-                    "tcp",
-                    "dport",
-                    &up_port,
-                    "return",
-                ],
-            )?;
+            if let Some(args) = upstream_output_exclusion_args(NftFamily::Ip, upstream) {
+                println!("  Excluding upstream proxy destination {upstream}...");
+                run_nft_args(&args)?;
+            }
         }
 
         if let Some(ref ports) = config.ports {
@@ -473,24 +464,10 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
         )?;
 
         if let Some(upstream) = config.upstream_addr {
-            let up_ip = upstream.ip().to_string();
-            let up_port = upstream.port().to_string();
-            let _ = std::process::Command::new("nft")
-                .args([
-                    "add",
-                    "rule",
-                    "ip6",
-                    "trans_proxy",
-                    "output",
-                    "ip6",
-                    "daddr",
-                    &up_ip,
-                    "tcp",
-                    "dport",
-                    &up_port,
-                    "return",
-                ])
-                .status();
+            if let Some(args) = upstream_output_exclusion_args(NftFamily::Ip6, upstream) {
+                println!("  Excluding upstream proxy destination {upstream}...");
+                run_nft_args(&args)?;
+            }
         }
 
         if let Some(ref ports) = config.ports {
@@ -556,6 +533,34 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
     Ok(())
 }
 
+fn upstream_output_exclusion_args(family: NftFamily, upstream: SocketAddr) -> Option<Vec<String>> {
+    let (table_family, addr_keyword) = match (family, upstream.ip()) {
+        (NftFamily::Ip, IpAddr::V4(_)) => ("ip", "ip"),
+        (NftFamily::Ip6, IpAddr::V6(_)) => ("ip6", "ip6"),
+        _ => return None,
+    };
+
+    Some(vec![
+        "add".to_string(),
+        "rule".to_string(),
+        table_family.to_string(),
+        "trans_proxy".to_string(),
+        "output".to_string(),
+        addr_keyword.to_string(),
+        "daddr".to_string(),
+        upstream.ip().to_string(),
+        "tcp".to_string(),
+        "dport".to_string(),
+        upstream.port().to_string(),
+        "return".to_string(),
+    ])
+}
+
+fn run_nft_args(args: &[String]) -> Result<()> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_cmd("nft", &refs)
+}
+
 pub fn teardown() -> Result<()> {
     println!("Removing nftables trans_proxy tables...");
     run_cmd_ignore("nft", &["delete", "table", "ip", "trans_proxy"]);
@@ -569,4 +574,72 @@ pub fn teardown() -> Result<()> {
 
     println!("Done.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{upstream_output_exclusion_args, NftFamily};
+
+    #[test]
+    fn builds_ipv4_upstream_exclusion_for_ipv4_table() {
+        let args =
+            upstream_output_exclusion_args(NftFamily::Ip, "192.0.2.10:1080".parse().unwrap())
+                .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "add",
+                "rule",
+                "ip",
+                "trans_proxy",
+                "output",
+                "ip",
+                "daddr",
+                "192.0.2.10",
+                "tcp",
+                "dport",
+                "1080",
+                "return"
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_ipv6_upstream_exclusion_for_ipv6_table() {
+        let args =
+            upstream_output_exclusion_args(NftFamily::Ip6, "[2001:db8::10]:1080".parse().unwrap())
+                .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "add",
+                "rule",
+                "ip6",
+                "trans_proxy",
+                "output",
+                "ip6",
+                "daddr",
+                "2001:db8::10",
+                "tcp",
+                "dport",
+                "1080",
+                "return"
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_upstream_exclusion_for_mismatched_address_family() {
+        assert!(upstream_output_exclusion_args(
+            NftFamily::Ip,
+            "[2001:db8::10]:1080".parse().unwrap(),
+        )
+        .is_none());
+        assert!(
+            upstream_output_exclusion_args(NftFamily::Ip6, "192.0.2.10:1080".parse().unwrap(),)
+                .is_none()
+        );
+    }
 }
