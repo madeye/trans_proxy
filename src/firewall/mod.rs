@@ -41,7 +41,7 @@ impl FirewallConfig {
         };
 
         let upstream_addr = if config.local_traffic {
-            Some(config.upstream_proxy.addr)
+            config.upstream_proxy.as_ref().map(|p| p.addr)
         } else {
             None
         };

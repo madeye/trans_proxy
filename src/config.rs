@@ -213,8 +213,11 @@ pub struct Config {
 
     /// Upstream proxy: host:port or http://host:port for HTTP CONNECT,
     /// socks5://host:port or socks5://user:pass@host:port for SOCKS5
-    #[arg(long)]
-    pub upstream_proxy: UpstreamProxy,
+    #[arg(
+        long,
+        required_unless_present_any = ["uninstall", "start", "stop", "teardown_firewall"]
+    )]
+    pub upstream_proxy: Option<UpstreamProxy>,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value_t = default_log_level())]
@@ -509,6 +512,7 @@ mod tests {
             "42",
         ]);
         assert!(config.local_traffic);
+        assert!(config.upstream_proxy.is_some());
         assert_eq!(config.proxy_user, "myuser");
         assert_eq!(config.fwmark, 42);
     }
@@ -516,6 +520,7 @@ mod tests {
     #[test]
     fn test_local_traffic_defaults() {
         let config = Config::parse_from(["trans_proxy", "--upstream-proxy", "127.0.0.1:1082"]);
+        assert!(config.upstream_proxy.is_some());
         assert!(!config.local_traffic);
         assert_eq!(config.proxy_user, "trans_proxy");
         assert_eq!(config.fwmark, 1);
@@ -578,6 +583,7 @@ mod tests {
             "--ports",
             "22,80,443",
         ]);
+        assert!(config.upstream_proxy.is_some());
         let ports = config.ports.unwrap();
         assert_eq!(ports.0, vec![22, 80, 443]);
     }
@@ -586,5 +592,19 @@ mod tests {
     fn test_ports_flag_default_none() {
         let config = Config::parse_from(["trans_proxy", "--upstream-proxy", "127.0.0.1:1082"]);
         assert!(config.ports.is_none());
+    }
+
+    #[test]
+    fn test_upstream_proxy_required_for_runtime() {
+        let result = Config::try_parse_from(["trans_proxy"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_upstream_proxy_not_required_for_control_commands() {
+        for flag in ["--uninstall", "--start", "--stop", "--teardown-firewall"] {
+            let config = Config::try_parse_from(["trans_proxy", flag]).unwrap();
+            assert!(config.upstream_proxy.is_none());
+        }
     }
 }

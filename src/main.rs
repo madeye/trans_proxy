@@ -156,7 +156,10 @@ fn main() -> Result<()> {
         let dns_task = if let Some(dns_listen) = config.resolve_dns_listen() {
             let table = dns_table.clone();
             let upstream = config.dns_upstream.clone();
-            let upstream_proxy = config.upstream_proxy.clone();
+            let upstream_proxy = config
+                .upstream_proxy
+                .clone()
+                .expect("upstream proxy is required when DNS forwarding runs");
             let strip_aaaa = config.dns_strip_aaaa;
             let handle = tokio::spawn(async move {
                 dns::run(dns_listen, upstream, table, &upstream_proxy, strip_aaaa).await
