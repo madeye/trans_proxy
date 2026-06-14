@@ -163,7 +163,10 @@ async fn handle_connection(
         None
     };
     let (mut outbound, leftover) = connect_via_proxy(
-        &config.upstream_proxy,
+        config
+            .upstream_proxy
+            .as_ref()
+            .expect("upstream proxy is required when proxy runs"),
         orig_dest,
         hostname.as_deref(),
         #[cfg(target_os = "linux")]
