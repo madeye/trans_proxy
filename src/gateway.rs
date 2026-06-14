@@ -83,7 +83,12 @@ fn get_mac_address_macos(iface: &str) -> Result<[u8; 6]> {
 fn get_default_gateway_ipv4(iface: &str) -> Result<Ipv4Addr> {
     let content =
         std::fs::read_to_string("/proc/net/route").context("cannot read /proc/net/route")?;
-    for line in content.lines().skip(1) {
+    parse_linux_default_gateway_ipv4(iface, &content)
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn parse_linux_default_gateway_ipv4(iface: &str, route_table: &str) -> Result<Ipv4Addr> {
+    for line in route_table.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 3 {
             continue;
@@ -96,7 +101,7 @@ fn get_default_gateway_ipv4(iface: &str) -> Result<Ipv4Addr> {
             continue;
         }
         let gw = u32::from_str_radix(fields[2], 16).context("invalid gateway hex")?;
-        return Ok(Ipv4Addr::from(gw.to_be()));
+        return Ok(Ipv4Addr::from(gw.to_le_bytes()));
     }
     bail!("no default gateway found for interface {}", iface)
 }
@@ -519,6 +524,32 @@ mod tests {
             &[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01]
         );
         assert_eq!(&pkt[48..56], &[0; 8]);
+    }
+
+    #[test]
+    fn test_parse_linux_default_gateway_ipv4() {
+        let route_table = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+wlan0\t00000000\tFE01A8C0\t0003\t0\t0\t200\t00000000\t0\t0\t0\n";
+
+        assert_eq!(
+            parse_linux_default_gateway_ipv4("eth0", route_table).unwrap(),
+            Ipv4Addr::new(192, 168, 1, 1)
+        );
+        assert_eq!(
+            parse_linux_default_gateway_ipv4("wlan0", route_table).unwrap(),
+            Ipv4Addr::new(192, 168, 1, 254)
+        );
+    }
+
+    #[test]
+    fn test_parse_linux_default_gateway_ipv4_ignores_non_default_route() {
+        let route_table = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n";
+
+        assert!(parse_linux_default_gateway_ipv4("eth0", route_table).is_err());
     }
 
     #[test]
