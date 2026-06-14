@@ -70,7 +70,6 @@ use tracing::{debug, info, warn};
 
 use crate::config::{DnsUpstream, ProxyAuth, ProxyProtocol, UpstreamProxy};
 
-const MAX_DNS_PACKET: usize = 1500;
 /// Maximum DNS message size over UDP (EDNS0 responses can far exceed 1500
 /// bytes; recv() silently truncates anything larger than the buffer).
 const MAX_UDP_DNS_PACKET: usize = 65_535;
@@ -956,7 +955,7 @@ async fn run_doh(
     let cache = Arc::new(DnsCache::new());
     let coalescer = Arc::new(QueryCoalescer::new());
 
-    let mut buf = vec![0u8; MAX_DNS_PACKET];
+    let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
     loop {
         let (n, client_addr) = socket.recv_from(&mut buf).await?;
         let packet = buf[..n].to_vec();
@@ -1433,6 +1432,71 @@ mod tests {
         packet[qtype_pos + 2..qtype_pos + 4].copy_from_slice(&qclass.to_be_bytes());
     }
 
+    fn build_dns_query_with_edns_padding(domain: &str, tx_id: u16, padding_len: usize) -> Vec<u8> {
+        let mut pkt = build_dns_query(domain, tx_id);
+        pkt[10..12].copy_from_slice(&1u16.to_be_bytes()); // ARCOUNT = 1
+        pkt.push(0); // root owner name
+        pkt.extend_from_slice(&DNS_TYPE_OPT.to_be_bytes());
+        pkt.extend_from_slice(&4096u16.to_be_bytes()); // UDP payload size
+        pkt.extend_from_slice(&0u32.to_be_bytes()); // extended RCODE / flags
+        let option_len = padding_len.min(u16::MAX as usize);
+        let rdlen = 4 + option_len;
+        pkt.extend_from_slice(&(rdlen as u16).to_be_bytes());
+        pkt.extend_from_slice(&12u16.to_be_bytes()); // EDNS Padding option
+        pkt.extend_from_slice(&(option_len as u16).to_be_bytes());
+        pkt.extend(std::iter::repeat_n(0, option_len));
+        pkt
+    }
+
+    async fn run_one_shot_http_proxy_for_doh(
+        body_len_tx: tokio::sync::oneshot::Sender<usize>,
+    ) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                assert!(n > 0, "client closed before HTTP headers");
+                header.extend_from_slice(&buf[..n]);
+                if header.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let header_end = header.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let header_text = String::from_utf8_lossy(&header[..header_end]);
+            let content_len = header_text
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("content-length:")
+                        .or_else(|| line.strip_prefix("Content-Length:"))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap();
+
+            let mut body = header[header_end..].to_vec();
+            while body.len() < content_len {
+                let n = stream.read(&mut buf).await.unwrap();
+                assert!(n > 0, "client closed before HTTP body");
+                body.extend_from_slice(&buf[..n]);
+            }
+            body.truncate(content_len);
+            let _ = body_len_tx.send(body.len());
+
+            let response = build_servfail(&body).unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\n\r\n",
+                response.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&response).await.unwrap();
+        });
+        addr
+    }
+
     #[test]
     fn test_build_nodata() {
         let query = build_dns_query_typed("example.com", 0xBEEF, DNS_TYPE_AAAA);
@@ -1502,7 +1566,7 @@ mod tests {
         // A query: still forwarded upstream
         let query = build_dns_query("example.com", 0x5555);
         client.send_to(&query, forwarder_addr).await.unwrap();
-        let (n, _) = tokio::time::timeout(
+        let (_n, _) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fake_upstream.recv_from(&mut upstream_buf),
         )
@@ -1513,6 +1577,53 @@ mod tests {
             parse_query_name(&upstream_buf[..n]),
             Some("example.com".to_string())
         );
+
+        forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn test_doh_udp_preserves_large_edns_query() {
+        let (body_len_tx, body_len_rx) = tokio::sync::oneshot::channel();
+        let proxy_addr = run_one_shot_http_proxy_for_doh(body_len_tx).await;
+        let upstream_proxy: UpstreamProxy = proxy_addr.to_string().parse().unwrap();
+
+        let forwarder_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let forwarder_addr = forwarder_socket.local_addr().unwrap();
+        drop(forwarder_socket);
+
+        let forwarder = tokio::spawn(async move {
+            let _ = run_doh(
+                forwarder_addr,
+                "http://dns.example/dns-query".to_string(),
+                DnsTable::new(),
+                &upstream_proxy,
+                false,
+            )
+            .await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let query = build_dns_query_with_edns_padding("example.com", 0xABCD, 2000);
+        assert!(query.len() > 1500);
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(&query, forwarder_addr).await.unwrap();
+
+        let observed_len = tokio::time::timeout(std::time::Duration::from_secs(2), body_len_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed_len, query.len());
+
+        let mut resp_buf = vec![0u8; MAX_UDP_DNS_PACKET];
+        let (_n, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.recv_from(&mut resp_buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&resp_buf[..2], &0xABCDu16.to_be_bytes());
+        assert_eq!(resp_buf[3] & 0x0F, 2); // SERVFAIL from fake DoH server
 
         forwarder.abort();
     }
