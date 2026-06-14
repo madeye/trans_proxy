@@ -122,6 +122,8 @@ impl std::str::FromStr for UpstreamProxy {
                 let (user, pass) = userinfo.split_once(':').ok_or_else(|| {
                     format!("invalid socks5 userinfo '{}': expected user:pass", userinfo)
                 })?;
+                validate_socks5_credential("username", user)?;
+                validate_socks5_credential("password", pass)?;
                 (
                     ProxyAuth::UsernamePassword {
                         username: user.to_string(),
@@ -151,6 +153,19 @@ impl std::str::FromStr for UpstreamProxy {
             })
         }
     }
+}
+
+fn validate_socks5_credential(label: &str, value: &str) -> Result<(), String> {
+    let len = value.len();
+    if len == 0 {
+        return Err(format!("invalid socks5 {label}: cannot be empty"));
+    }
+    if len > u8::MAX as usize {
+        return Err(format!(
+            "invalid socks5 {label}: {len} bytes exceeds 255-byte limit"
+        ));
+    }
+    Ok(())
 }
 
 /// Comma-separated list of TCP ports for firewall redirection.
@@ -463,6 +478,27 @@ mod tests {
             _ => panic!("expected Socks5 with UsernamePassword auth"),
         }
         assert_eq!(proxy.addr.to_string(), "127.0.0.1:1080");
+    }
+
+    #[test]
+    fn test_upstream_proxy_rejects_empty_socks5_auth_fields() {
+        let empty_user: Result<UpstreamProxy, _> = "socks5://:pass@127.0.0.1:1080".parse();
+        assert!(empty_user.is_err());
+
+        let empty_pass: Result<UpstreamProxy, _> = "socks5://user:@127.0.0.1:1080".parse();
+        assert!(empty_pass.is_err());
+    }
+
+    #[test]
+    fn test_upstream_proxy_rejects_oversized_socks5_auth_fields() {
+        let oversized = "u".repeat(256);
+        let oversized_user: Result<UpstreamProxy, _> =
+            format!("socks5://{oversized}:pass@127.0.0.1:1080").parse();
+        assert!(oversized_user.is_err());
+
+        let oversized_pass: Result<UpstreamProxy, _> =
+            format!("socks5://user:{oversized}@127.0.0.1:1080").parse();
+        assert!(oversized_pass.is_err());
     }
 
     #[test]

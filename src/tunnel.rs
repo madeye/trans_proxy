@@ -317,26 +317,7 @@ async fn socks5_username_auth(
     username: &str,
     password: &str,
 ) -> Result<()> {
-    if username.len() > MAX_SOCKS5_FIELD_LEN {
-        bail!(
-            "SOCKS5: username is {} bytes, maximum is {}",
-            username.len(),
-            MAX_SOCKS5_FIELD_LEN
-        );
-    }
-    if password.len() > MAX_SOCKS5_FIELD_LEN {
-        bail!(
-            "SOCKS5: password is {} bytes, maximum is {}",
-            password.len(),
-            MAX_SOCKS5_FIELD_LEN
-        );
-    }
-
-    let mut auth_req = vec![0x01]; // sub-negotiation version
-    auth_req.push(username.len() as u8);
-    auth_req.extend_from_slice(username.as_bytes());
-    auth_req.push(password.len() as u8);
-    auth_req.extend_from_slice(password.as_bytes());
+    let auth_req = build_socks5_auth_request(username, password)?;
 
     timeout(CONNECT_TIMEOUT, stream.write_all(&auth_req))
         .await
@@ -382,6 +363,29 @@ fn is_valid_proxy_hostname(hostname: &str) -> bool {
                 .last()
                 .is_some_and(|b| b.is_ascii_alphanumeric())
     })
+}
+
+fn build_socks5_auth_request(username: &str, password: &str) -> Result<Vec<u8>> {
+    validate_socks5_auth_field("username", username)?;
+    validate_socks5_auth_field("password", password)?;
+
+    let mut auth_req = vec![0x01]; // sub-negotiation version
+    auth_req.push(username.len() as u8);
+    auth_req.extend_from_slice(username.as_bytes());
+    auth_req.push(password.len() as u8);
+    auth_req.extend_from_slice(password.as_bytes());
+    Ok(auth_req)
+}
+
+fn validate_socks5_auth_field(label: &str, value: &str) -> Result<()> {
+    let len = value.len();
+    if len == 0 {
+        bail!("SOCKS5: {label} cannot be empty");
+    }
+    if len > MAX_SOCKS5_FIELD_LEN {
+        bail!("SOCKS5: {label} is {len} bytes, exceeds {MAX_SOCKS5_FIELD_LEN}-byte limit");
+    }
+    Ok(())
 }
 
 /// Map a SOCKS5 reply status byte to a human-readable error message.
@@ -530,6 +534,21 @@ mod tests {
             "{}.com",
             "a".repeat(254)
         )));
+    }
+
+    #[test]
+    fn test_socks5_auth_request_encodes_field_lengths() {
+        let req = build_socks5_auth_request("user", "pass").unwrap();
+
+        assert_eq!(req, b"\x01\x04user\x04pass");
+    }
+
+    #[test]
+    fn test_socks5_auth_request_rejects_invalid_field_lengths() {
+        assert!(build_socks5_auth_request("", "pass").is_err());
+        assert!(build_socks5_auth_request("user", "").is_err());
+        assert!(build_socks5_auth_request(&"u".repeat(256), "pass").is_err());
+        assert!(build_socks5_auth_request("user", &"p".repeat(256)).is_err());
     }
 
     /// Run handshake_http_connect against a fake proxy that replies with
