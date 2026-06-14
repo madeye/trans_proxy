@@ -923,9 +923,12 @@
 
         <div class="step">
           <h3>Set up pf redirection</h3>
-          <p>In another terminal, install the pf rules (HTTP/HTTPS only &mdash; DNS is handled directly):</p>
-<pre class="code"><span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span></pre>
-          <p>The script prints your gateway IP and setup summary.</p>
+          <p>In another terminal, install the pf rules:</p>
+<pre class="code"><span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--dns</span> <span class="flag">--interface</span> <span class="value">en0</span> \
+  <span class="flag">--setup-firewall</span></pre>
+          <p>The command prints your gateway IP and setup summary.</p>
         </div>
 
         <div class="step">
@@ -935,7 +938,9 @@
 
         <div class="step">
           <h3>Tear down when done</h3>
-<pre class="code"><span class="cmd">sudo scripts/pf_teardown.sh</span>
+<pre class="code"><span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--teardown-firewall</span>
 <span class="comment"># If running as daemon</span>
 <span class="cmd">sudo kill</span> <span class="value">$(cat /var/run/trans_proxy.pid)</span></pre>
         </div>
@@ -1019,13 +1024,17 @@
         </tbody>
       </table>
 
-      <h3 style="margin-top: 32px;">pf Scripts</h3>
-<pre class="code"><span class="comment"># Setup: pf_setup.sh &lt;interface&gt; [proxy_port]</span>
-<span class="comment"># DNS no longer needs pf redirection &mdash; listens on port 53 directly</span>
-<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span>
+      <h3 style="margin-top: 32px;">Firewall Commands</h3>
+<pre class="code"><span class="comment"># Setup: use the same proxy/interface flags as the running service</span>
+<span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--interface</span> <span class="value">en0</span> \
+  <span class="flag">--setup-firewall</span>
 
 <span class="comment"># Teardown: flushes anchor rules, disables IP forwarding</span>
-<span class="cmd">sudo scripts/pf_teardown.sh</span></pre>
+<span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--teardown-firewall</span></pre>
     </div>
   </section>
 

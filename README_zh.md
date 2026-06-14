@@ -78,12 +78,17 @@ sudo ./target/release/trans_proxy \
 #   --dns
 
 # 第 2 步：设置 pf 重定向
-sudo scripts/pf_setup.sh en0 8443
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns --interface en0 \
+  --setup-firewall
 
 # 第 3 步：配置客户端设备（参见下方"客户端设置"）
 
 # 第 4 步：使用完毕后，拆除配置
-sudo scripts/pf_teardown.sh
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --teardown-firewall
 sudo kill $(cat /var/run/trans_proxy.pid)
 ```
 
@@ -98,12 +103,17 @@ sudo ./trans_proxy \
   --dns --interface eth0
 
 # 第 2 步：设置 nftables 重定向
-sudo scripts/nftables_setup.sh eth0 8443
+sudo ./trans_proxy \
+  --upstream-proxy 127.0.0.1:7890 \
+  --dns --interface eth0 \
+  --setup-firewall
 
 # 第 3 步：配置客户端设备（参见下方"客户端设置"）
 
 # 第 4 步：使用完毕后，拆除配置
-sudo scripts/nftables_teardown.sh
+sudo ./trans_proxy \
+  --upstream-proxy 127.0.0.1:7890 \
+  --teardown-firewall
 sudo kill $(cat /var/run/trans_proxy.pid)
 ```
 
@@ -195,25 +205,23 @@ sudo ./target/release/trans_proxy \
 #### macOS (pf)
 
 ```bash
-sudo scripts/pf_setup.sh <interface> [proxy_port] [upstream_proxy] [ports]
-sudo scripts/pf_setup.sh en0 8443                              # 所有 TCP
-sudo scripts/pf_setup.sh en0 8443 "" 80,443                    # 仅端口 80,443
-sudo scripts/pf_setup.sh en0 8443 127.0.0.1:1082              # 所有 TCP + 本地流量
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --interface en0 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --interface en0 --ports 80,443 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --interface en0 --local-traffic --setup-firewall
 
 # 拆除配置
-sudo scripts/pf_teardown.sh
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --teardown-firewall
 ```
 
 #### Linux (nftables)
 
 ```bash
-sudo scripts/nftables_setup.sh <interface> [proxy_port] [fwmark] [upstream_proxy] [ports]
-sudo scripts/nftables_setup.sh eth0 8443                                  # 所有 TCP
-sudo scripts/nftables_setup.sh eth0 8443 "" "" 80,443                     # 仅端口 80,443
-sudo scripts/nftables_setup.sh eth0 8443 1 127.0.0.1:7890                # 所有 TCP + 本地流量
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --interface eth0 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --interface eth0 --ports 80,443 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --interface eth0 --local-traffic --setup-firewall
 
 # 拆除配置
-sudo scripts/nftables_teardown.sh
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --teardown-firewall
 ```
 
 ### Linux 内核优化
