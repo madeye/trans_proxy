@@ -458,15 +458,7 @@ impl std::fmt::Display for TcpDnsUpstream {
 /// dedicated client so the TCP listener does not share state with the UDP
 /// DoH path.
 fn build_doh_client(upstream_proxy: &UpstreamProxy) -> Result<reqwest::Client> {
-    let proxy_url = match &upstream_proxy.protocol {
-        ProxyProtocol::HttpConnect => format!("http://{}", upstream_proxy.addr),
-        ProxyProtocol::Socks5(ProxyAuth::None) => {
-            format!("socks5://{}", upstream_proxy.addr)
-        }
-        ProxyProtocol::Socks5(ProxyAuth::UsernamePassword { username, password }) => {
-            format!("socks5://{}:{}@{}", username, password, upstream_proxy.addr)
-        }
-    };
+    let proxy_url = doh_proxy_url(upstream_proxy);
     let proxy = reqwest::Proxy::all(&proxy_url).context("Invalid upstream proxy URL for DoH")?;
     reqwest::Client::builder()
         .proxy(proxy)
@@ -474,6 +466,35 @@ fn build_doh_client(upstream_proxy: &UpstreamProxy) -> Result<reqwest::Client> {
         .pool_idle_timeout(Duration::from_secs(300))
         .build()
         .context("Failed to build HTTP client for DoH")
+}
+
+fn doh_proxy_url(upstream_proxy: &UpstreamProxy) -> String {
+    match &upstream_proxy.protocol {
+        ProxyProtocol::HttpConnect => format!("http://{}", upstream_proxy.addr),
+        ProxyProtocol::Socks5(ProxyAuth::None) => {
+            format!("socks5://{}", upstream_proxy.addr)
+        }
+        ProxyProtocol::Socks5(ProxyAuth::UsernamePassword { username, password }) => {
+            format!(
+                "socks5://{}:{}@{}",
+                percent_encode_userinfo(username),
+                percent_encode_userinfo(password),
+                upstream_proxy.addr
+            )
+        }
+    }
+}
+
+fn percent_encode_userinfo(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(b as char);
+        } else {
+            encoded.push_str(&format!("%{b:02X}"));
+        }
+    }
+    encoded
 }
 
 /// Run the TCP DNS listener (RFC 7766).
@@ -930,15 +951,7 @@ async fn run_doh(
     );
 
     // Build an HTTP/2-capable client that routes through the upstream proxy
-    let proxy_url = match &upstream_proxy.protocol {
-        ProxyProtocol::HttpConnect => format!("http://{}", upstream_proxy.addr),
-        ProxyProtocol::Socks5(ProxyAuth::None) => {
-            format!("socks5://{}", upstream_proxy.addr)
-        }
-        ProxyProtocol::Socks5(ProxyAuth::UsernamePassword { username, password }) => {
-            format!("socks5://{}:{}@{}", username, password, upstream_proxy.addr)
-        }
-    };
+    let proxy_url = doh_proxy_url(upstream_proxy);
     let proxy = reqwest::Proxy::all(&proxy_url).context("Invalid upstream proxy URL for DoH")?;
     let client = reqwest::Client::builder()
         .proxy(proxy)
@@ -1353,6 +1366,24 @@ mod tests {
         pkt.extend_from_slice(&ip.octets());
 
         pkt
+    }
+
+    #[test]
+    fn test_doh_proxy_url_percent_encodes_socks5_auth() {
+        let proxy: UpstreamProxy = "socks5://user:p@ss:word@127.0.0.1:1080".parse().unwrap();
+        let url = doh_proxy_url(&proxy);
+
+        assert_eq!(
+            url,
+            "socks5://user:p%40ss%3Aword@127.0.0.1:1080".to_string()
+        );
+        reqwest::Proxy::all(&url).unwrap();
+    }
+
+    #[test]
+    fn test_percent_encode_userinfo() {
+        assert_eq!(percent_encode_userinfo("safe-._~AZ09"), "safe-._~AZ09");
+        assert_eq!(percent_encode_userinfo("a b/c@d:e"), "a%20b%2Fc%40d%3Ae");
     }
 
     #[test]
