@@ -216,6 +216,7 @@ fn generate_wrapper(args: &[String]) -> String {
         "--interface",
         "--listen-addr",
         "--upstream-proxy",
+        "--dns-listen",
         "--ports",
     ] {
         if let Some(val) = extract_arg(&filtered_args, flag) {
@@ -390,6 +391,23 @@ mod tests {
         let wrapper = generate_wrapper(&args);
 
         assert!(wrapper.contains("--ports 80,443"));
+    }
+
+    #[test]
+    fn test_generate_wrapper_forwards_dns_listen_to_firewall_setup() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--dns".into(),
+            "--dns-listen".into(),
+            "127.0.0.1:5353".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains("exec /usr/local/bin/trans_proxy --upstream-proxy 127.0.0.1:1082 --dns --dns-listen 127.0.0.1:5353"));
+        assert!(wrapper.contains(
+            "--setup-firewall --upstream-proxy 127.0.0.1:1082 --dns-listen 127.0.0.1:5353 --dns"
+        ));
     }
 
     #[test]
