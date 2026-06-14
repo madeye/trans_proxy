@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{timeout, Duration};
+use tokio::time::{timeout, Duration, Sleep};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -187,8 +187,13 @@ async fn handle_connection(
         inbound.write_all(&leftover).await?;
     }
 
-    let (client_bytes, server_bytes) =
-        relay_with_shutdown(&mut inbound, &mut outbound, RELAY_BUF_SIZE).await?;
+    let (client_bytes, server_bytes) = relay_with_shutdown(
+        &mut inbound,
+        &mut outbound,
+        RELAY_BUF_SIZE,
+        SHUTDOWN_GRACE_PERIOD,
+    )
+    .await?;
     info!(
         "{} -> {} [closed] tx={} rx={}",
         client_addr, dest_display, client_bytes, server_bytes
@@ -207,6 +212,7 @@ async fn relay_with_shutdown(
     inbound: &mut TcpStream,
     outbound: &mut TcpStream,
     buf_size: usize,
+    grace_period: Duration,
 ) -> io::Result<(u64, u64)> {
     let (mut ri, mut wi) = inbound.split();
     let (mut ro, mut wo) = outbound.split();
@@ -218,6 +224,7 @@ async fn relay_with_shutdown(
 
     let mut cbuf = vec![0u8; buf_size];
     let mut sbuf = vec![0u8; buf_size];
+    let mut grace_timer: Option<std::pin::Pin<Box<Sleep>>> = None;
 
     loop {
         if client_eof && server_eof {
@@ -230,6 +237,9 @@ async fn relay_with_shutdown(
                 match result? {
                     0 => {
                         client_eof = true;
+                        if !server_eof && grace_timer.is_none() {
+                            grace_timer = Some(Box::pin(tokio::time::sleep(grace_period)));
+                        }
                         let _ = wo.shutdown().await;
                     }
                     n => {
@@ -243,6 +253,9 @@ async fn relay_with_shutdown(
                 match result? {
                     0 => {
                         server_eof = true;
+                        if !client_eof && grace_timer.is_none() {
+                            grace_timer = Some(Box::pin(tokio::time::sleep(grace_period)));
+                        }
                         let _ = wi.shutdown().await;
                     }
                     n => {
@@ -252,7 +265,11 @@ async fn relay_with_shutdown(
                 }
             }
             // Grace period: one side closed, the other hasn't finished flushing
-            _ = tokio::time::sleep(SHUTDOWN_GRACE_PERIOD), if (client_eof || server_eof) && !(client_eof && server_eof) => {
+            _ = async {
+                if let Some(timer) = grace_timer.as_mut() {
+                    timer.as_mut().await;
+                }
+            }, if grace_timer.is_some() && !(client_eof && server_eof) => {
                 if !client_eof {
                     let _ = wo.shutdown().await;
                     client_eof = true;
@@ -266,4 +283,52 @@ async fn relay_with_shutdown(
     }
 
     Ok((client_bytes, server_bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::Instant;
+
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn test_relay_grace_period_is_absolute_after_half_close() {
+        let (mut inbound_peer, mut inbound) = tcp_pair().await;
+        let (mut outbound_peer, mut outbound) = tcp_pair().await;
+
+        inbound_peer.shutdown().await.unwrap();
+
+        let writer = tokio::spawn(async move {
+            let chunk = vec![b'x'; 1024];
+            loop {
+                if outbound_peer.write_all(&chunk).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let started = Instant::now();
+        let result =
+            relay_with_shutdown(&mut inbound, &mut outbound, 1024, Duration::from_millis(50))
+                .await
+                .unwrap();
+
+        assert_eq!(result.0, 0);
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "relay grace period was extended by continued upstream data"
+        );
+
+        drop(inbound);
+        drop(outbound);
+        let _ = writer.await;
+    }
 }
