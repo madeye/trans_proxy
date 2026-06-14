@@ -206,11 +206,7 @@ fn generate_plist(_args: &[String]) -> String {
 fn generate_wrapper(args: &[String]) -> String {
     let filtered_args = filter_service_args(args);
 
-    let exec_args = if filtered_args.is_empty() {
-        INSTALL_BIN.to_string()
-    } else {
-        format!("{} {}", INSTALL_BIN, filtered_args.join(" "))
-    };
+    let exec_args = shell_command(INSTALL_BIN, &filtered_args);
 
     // Build --setup-firewall command from the same args
     let mut setup_args = Vec::new();
@@ -233,7 +229,7 @@ fn generate_wrapper(args: &[String]) -> String {
         }
     }
 
-    let setup_cmd = format!("{} {}", INSTALL_BIN, setup_args.join(" "));
+    let setup_cmd = shell_command(INSTALL_BIN, &setup_args);
     let teardown_cmd = format!("{INSTALL_BIN} --teardown-firewall");
 
     format!(
@@ -252,6 +248,29 @@ trap cleanup EXIT
 exec {exec_args}
 "#
     )
+}
+
+fn shell_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program.to_string())
+        .chain(args.iter().map(|arg| shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'@' | b'%' | b'_' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+                )
+        })
+    {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -413,5 +432,24 @@ mod tests {
         assert!(!wrapper.contains("--daemon"));
         assert!(!wrapper.contains("--pid-file"));
         assert!(wrapper.contains("--upstream-proxy"));
+    }
+
+    #[test]
+    fn test_generate_wrapper_shell_quotes_arguments() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--interface".into(),
+            "en0; touch /tmp/pwn".into(),
+        ];
+        let wrapper = generate_wrapper(&args);
+
+        assert!(wrapper.contains("--interface 'en0; touch /tmp/pwn'"));
+        assert!(!wrapper.contains("--interface en0; touch /tmp/pwn"));
+    }
+
+    #[test]
+    fn test_shell_quote_escapes_single_quote() {
+        assert_eq!(shell_quote("en'0"), "'en'\\''0'");
     }
 }
