@@ -164,7 +164,7 @@ struct DnsCacheEntry {
 
 /// TTL-aware DNS response cache for DoH.
 struct DnsCache {
-    entries: RwLock<HashMap<String, DnsCacheEntry>>,
+    entries: RwLock<HashMap<Vec<u8>, DnsCacheEntry>>,
 }
 
 impl DnsCache {
@@ -176,9 +176,9 @@ impl DnsCache {
 
     /// Look up a cached response, returning it with the transaction ID
     /// rewritten and record TTLs decremented by the time spent in the cache.
-    fn get(&self, name: &str, tx_id: u16) -> Option<Vec<u8>> {
+    fn get(&self, key: &[u8], tx_id: u16) -> Option<Vec<u8>> {
         let map = self.entries.read().ok()?;
-        let entry = map.get(name)?;
+        let entry = map.get(key)?;
         if entry.expires <= Instant::now() {
             return None;
         }
@@ -198,7 +198,7 @@ impl DnsCache {
     }
 
     /// Cache a response, extracting the minimum TTL from answer records.
-    fn put(&self, name: &str, response: &[u8]) {
+    fn put(&self, key: Vec<u8>, response: &[u8]) {
         let ttl = extract_min_ttl(response)
             .unwrap_or(MIN_TTL)
             .clamp(MIN_TTL, MAX_TTL);
@@ -211,7 +211,7 @@ impl DnsCache {
         if let Ok(mut map) = self.entries.write() {
             // Simple eviction when cache is full
             if map.len() >= MAX_CACHE_ENTRIES {
-                let stale: Vec<String> = map
+                let stale: Vec<Vec<u8>> = map
                     .iter()
                     .filter(|(_, v)| v.expires <= Instant::now())
                     .map(|(k, _)| k.clone())
@@ -221,14 +221,14 @@ impl DnsCache {
                 }
                 // If still full, drop half
                 if map.len() >= MAX_CACHE_ENTRIES {
-                    let keys: Vec<String> =
+                    let keys: Vec<Vec<u8>> =
                         map.keys().take(MAX_CACHE_ENTRIES / 2).cloned().collect();
                     for k in keys {
                         map.remove(&k);
                     }
                 }
             }
-            map.insert(name.to_string(), entry);
+            map.insert(key, entry);
         }
     }
 }
@@ -362,7 +362,7 @@ fn build_nodata(query: &[u8]) -> Option<Vec<u8>> {
 
 /// In-flight query coalescer: deduplicates concurrent DoH queries for the same domain.
 struct QueryCoalescer {
-    in_flight: RwLock<HashMap<String, broadcast::Sender<Vec<u8>>>>,
+    in_flight: RwLock<HashMap<Vec<u8>, broadcast::Sender<Vec<u8>>>>,
 }
 
 impl QueryCoalescer {
@@ -373,24 +373,24 @@ impl QueryCoalescer {
     }
 
     /// Try to join an existing in-flight query. Returns a receiver if one exists.
-    fn try_join(&self, name: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
+    fn try_join(&self, key: &[u8]) -> Option<broadcast::Receiver<Vec<u8>>> {
         let map = self.in_flight.read().ok()?;
-        map.get(name).map(|tx| tx.subscribe())
+        map.get(key).map(|tx| tx.subscribe())
     }
 
     /// Register a new in-flight query. Returns the sender to broadcast the result.
-    fn register(&self, name: &str) -> broadcast::Sender<Vec<u8>> {
+    fn register(&self, key: Vec<u8>) -> broadcast::Sender<Vec<u8>> {
         let (tx, _) = broadcast::channel(1);
         if let Ok(mut map) = self.in_flight.write() {
-            map.insert(name.to_string(), tx.clone());
+            map.insert(key, tx.clone());
         }
         tx
     }
 
     /// Remove a completed in-flight query.
-    fn complete(&self, name: &str) {
+    fn complete(&self, key: &[u8]) {
         if let Ok(mut map) = self.in_flight.write() {
-            map.remove(name);
+            map.remove(key);
         }
     }
 }
@@ -967,7 +967,7 @@ async fn run_doh(
 
         let query_name = parse_query_name(&packet).unwrap_or_default();
         let tx_id = u16::from_be_bytes([packet[0], packet[1]]);
-        let ckey = cache_key(&query_name, &packet);
+        let ckey = cache_key(&packet);
 
         debug!("DNS query from {}: {} (DoH)", client_addr, query_name);
 
@@ -1053,7 +1053,7 @@ async fn run_doh(
             continue;
         }
 
-        let tx = coalescer.register(&ckey);
+        let tx = coalescer.register(ckey.clone());
 
         let socket = Arc::clone(&socket);
         let client = client.clone();
@@ -1071,7 +1071,7 @@ async fn run_doh(
                     let resolved_ips = parse_ip_records(&response);
 
                     if resolved_ips.is_some() {
-                        cache.put(&ckey_owned, &response);
+                        cache.put(ckey_owned.clone(), &response);
                     }
 
                     // Remove the in-flight entry BEFORE broadcasting: a
@@ -1148,10 +1148,20 @@ async fn doh_query(client: &reqwest::Client, url: &str, query: &[u8]) -> Result<
     Ok(bytes.to_vec())
 }
 
-/// Build a cache key from domain name and query type (e.g. "example.com/A" or "example.com/AAAA").
-fn cache_key(name: &str, packet: &[u8]) -> String {
-    let qtype = parse_query_type(packet).unwrap_or(0);
-    format!("{}/{}", name, qtype)
+/// Build a cache/coalescing key from the full DNS query with only the
+/// transaction ID normalized.
+///
+/// The DNS response echoes the question section and can depend on header flags
+/// and EDNS options, so keying only by QNAME/QTYPE can replay a response for a
+/// different QCLASS or otherwise distinct query. The transaction ID is the one
+/// field intentionally rewritten before serving a cached/coalesced response.
+fn cache_key(packet: &[u8]) -> Vec<u8> {
+    let mut key = packet.to_vec();
+    if key.len() >= 2 {
+        key[0] = 0;
+        key[1] = 0;
+    }
+    key
 }
 
 /// Parse the query type (QTYPE) from a DNS packet. Returns the raw u16 value.
@@ -1418,6 +1428,11 @@ mod tests {
         build_dns_query_typed(domain, tx_id, DNS_TYPE_A)
     }
 
+    fn set_query_class(packet: &mut [u8], qclass: u16) {
+        let qtype_pos = skip_dns_name(packet, 12).unwrap();
+        packet[qtype_pos + 2..qtype_pos + 4].copy_from_slice(&qclass.to_be_bytes());
+    }
+
     #[test]
     fn test_build_nodata() {
         let query = build_dns_query_typed("example.com", 0xBEEF, DNS_TYPE_AAAA);
@@ -1507,19 +1522,32 @@ mod tests {
         let cache = DnsCache::new();
         let ip = Ipv4Addr::new(93, 184, 216, 34);
         let pkt = build_dns_response("example.com", ip);
+        let query = build_dns_query("example.com", 0xABCD);
+        let key = cache_key(&query);
 
         // Miss
-        assert!(cache.get("example.com", 0x1234).is_none());
+        assert!(cache.get(&key, 0x1234).is_none());
 
         // Put and hit
-        cache.put("example.com", &pkt);
-        let cached = cache.get("example.com", 0x1234).unwrap();
+        cache.put(key.clone(), &pkt);
+        let cached = cache.get(&key, 0x1234).unwrap();
         assert!(cached.len() >= 12);
         // Verify tx_id was rewritten
         assert_eq!(cached[0], 0x12);
         assert_eq!(cached[1], 0x34);
         let ips = parse_ip_records(&cached).unwrap();
         assert_eq!(ips, vec![IpAddr::V4(ip)]);
+    }
+
+    #[test]
+    fn test_cache_key_ignores_transaction_id_only() {
+        let mut query_a = build_dns_query("example.com", 0x1111);
+        let query_b = build_dns_query("example.com", 0x2222);
+        assert_eq!(cache_key(&query_a), cache_key(&query_b));
+
+        let class_in_key = cache_key(&query_a);
+        set_query_class(&mut query_a, 3);
+        assert_ne!(cache_key(&query_a), class_in_key);
     }
 
     #[test]
@@ -1551,15 +1579,17 @@ mod tests {
         let pkt = build_dns_response("example.com", Ipv4Addr::new(1, 2, 3, 4));
         // Insert an entry backdated by 20 seconds
         let now = Instant::now();
+        let query = build_dns_query("example.com", 0xABCD);
+        let key = cache_key(&query);
         cache.entries.write().unwrap().insert(
-            "example.com".to_string(),
+            key.clone(),
             DnsCacheEntry {
                 response: pkt,
                 inserted: now - Duration::from_secs(20),
                 expires: now + Duration::from_secs(40),
             },
         );
-        let cached = cache.get("example.com", 0x1234).unwrap();
+        let cached = cache.get(&key, 0x1234).unwrap();
         // Original TTL=60, 20s elapsed → 40 (allow 1s of test slack)
         let ttl = extract_min_ttl(&cached).unwrap();
         assert!((39..=40).contains(&ttl), "ttl was {}", ttl);
