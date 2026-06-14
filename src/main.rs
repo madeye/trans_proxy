@@ -108,11 +108,6 @@ fn main() -> Result<()> {
         return firewall::setup(&fw_config);
     }
 
-    // Daemonize before starting the async runtime
-    if config.daemon {
-        daemon::daemonize(&config.pid_file)?;
-    }
-
     // Set up logging — write to file in daemon mode, stderr otherwise
     let filter = EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -124,12 +119,28 @@ fn main() -> Result<()> {
         }
     });
 
-    if let Some(ref path) = log_file {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| anyhow::anyhow!("Failed to open log file {}: {}", path.display(), e))?;
+    let log_writer = if let Some(ref path) = log_file {
+        Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to open log file {}: {}", path.display(), e)
+                })?,
+        )
+    } else {
+        None
+    };
+
+    // Daemonize only after startup-only file checks have succeeded. If the log
+    // path is invalid, the foreground parent should return an error instead of
+    // exiting successfully while the child immediately dies.
+    if config.daemon {
+        daemon::daemonize(&config.pid_file)?;
+    }
+
+    if let Some(file) = log_writer {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(file)
