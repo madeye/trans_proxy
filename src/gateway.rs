@@ -129,7 +129,7 @@ fn get_interface_ipv6(iface: &str) -> Result<(Ipv6Addr, Ipv6Addr)> {
     use std::ffi::CString;
     let ifname = CString::new(iface)?;
     let mut link_local = None;
-    let mut global = None;
+    let mut prefix = None;
 
     unsafe {
         let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -149,7 +149,7 @@ fn get_interface_ipv6(iface: &str) -> Result<(Ipv6Addr, Ipv6Addr)> {
                 if (ip.segments()[0] & 0xffc0) == 0xfe80 {
                     link_local = Some(ip);
                 } else if !ip.is_loopback() && !ip.is_multicast() {
-                    global = Some(ip);
+                    prefix = Some(ip);
                 }
             }
             cursor = ifa.ifa_next;
@@ -157,9 +157,16 @@ fn get_interface_ipv6(iface: &str) -> Result<(Ipv6Addr, Ipv6Addr)> {
         libc::freeifaddrs(ifaddrs);
     }
 
+    select_router_advertisement_addrs(link_local, prefix)
+}
+
+fn select_router_advertisement_addrs(
+    link_local: Option<Ipv6Addr>,
+    prefix: Option<Ipv6Addr>,
+) -> Result<(Ipv6Addr, Ipv6Addr)> {
     let ll = link_local.context("no link-local IPv6 address found")?;
-    let gl = global.unwrap_or(ll);
-    Ok((ll, gl))
+    let prefix = prefix.context("no non-link-local IPv6 prefix address found")?;
+    Ok((ll, prefix))
 }
 
 fn get_interface_index(iface: &str) -> Result<u32> {
@@ -561,6 +568,25 @@ wlan0\t00000000\tFE01A8C0\t0003\t0\t0\t200\t00000000\t0\t0\t0\n";
         assert_eq!(
             parse_linux_default_gateway_ipv4("wlan0", route_table).unwrap(),
             Ipv4Addr::new(192, 168, 1, 254)
+        );
+    }
+
+    #[test]
+    fn test_select_router_advertisement_addrs_requires_prefix() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 2, 3, 4);
+        let result = select_router_advertisement_addrs(Some(link_local), None);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_select_router_advertisement_addrs_uses_non_link_local_prefix() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 2, 3, 4);
+        let prefix = Ipv6Addr::new(0xfd00, 0, 0, 1, 0, 0, 0, 1);
+
+        assert_eq!(
+            select_router_advertisement_addrs(Some(link_local), Some(prefix)).unwrap(),
+            (link_local, prefix)
         );
     }
 
