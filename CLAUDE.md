@@ -9,9 +9,11 @@ Transparent TCP proxy that intercepts traffic via OS firewall rules and forwards
 cargo build --release
 
 # Cross-compile for Linux aarch64 (e.g., Raspberry Pi)
-# Requires: cargo install cross
-# Must run from a path Docker can mount (e.g., ~/workspace, NOT /Volumes/)
-cross build --release --target aarch64-unknown-linux-gnu
+# Requires: cargo install cargo-zigbuild  (+ a Zig toolchain: brew install zig)
+#           rustup target add aarch64-unknown-linux-gnu
+# No Docker needed, so this works from any path (including /Volumes/...).
+# The glibc suffix (.2.31) pins the target ABI; 2.31 covers Pi OS bullseye/bookworm.
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31
 # Binary at: target/aarch64-unknown-linux-gnu/release/trans_proxy
 ```
 
@@ -36,7 +38,7 @@ docker run --rm --privileged trans_proxy_test /app/target/release/e2e
 ## Deploy to remote Linux host
 
 ```bash
-cross build --release --target aarch64-unknown-linux-gnu
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31
 scp target/aarch64-unknown-linux-gnu/release/trans_proxy user@host:/tmp/trans_proxy
 ssh user@host "sudo systemctl stop trans_proxy && sudo cp /tmp/trans_proxy /usr/local/bin/trans_proxy && sudo chmod 755 /usr/local/bin/trans_proxy && sudo systemctl start trans_proxy"
 ```
