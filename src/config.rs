@@ -38,12 +38,7 @@ impl std::str::FromStr for DnsUpstream {
         if s.starts_with("https://") {
             Ok(DnsUpstream::Https(s.to_string()))
         } else {
-            s.parse::<SocketAddr>().map(DnsUpstream::Udp).map_err(|e| {
-                format!(
-                    "invalid DNS upstream '{}': expected socket address or https:// URL: {}",
-                    s, e
-                )
-            })
+            resolve_dns_upstream_addr(s).map(DnsUpstream::Udp)
         }
     }
 }
@@ -174,6 +169,28 @@ fn parse_upstream_addr(addr: &str) -> Result<SocketAddr, String> {
         .map_err(|e| e.to_string())?
         .next()
         .ok_or_else(|| "hostname resolved to no addresses".to_string())
+}
+
+fn resolve_dns_upstream_addr(input: &str) -> Result<SocketAddr, String> {
+    if let Ok(addr) = input.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    input
+        .to_socket_addrs()
+        .map_err(|e| {
+            format!(
+                "invalid DNS upstream '{}': expected host:port or https:// URL: {}",
+                input, e
+            )
+        })?
+        .next()
+        .ok_or_else(|| {
+            format!(
+                "invalid DNS upstream '{}': hostname resolved to no addresses",
+                input
+            )
+        })
 }
 
 /// Comma-separated list of TCP ports for firewall redirection.
@@ -432,6 +449,18 @@ mod tests {
         let upstream: DnsUpstream = "8.8.8.8:53".parse().unwrap();
         match upstream {
             DnsUpstream::Udp(addr) => assert_eq!(addr.to_string(), "8.8.8.8:53"),
+            _ => panic!("expected Udp variant"),
+        }
+    }
+
+    #[test]
+    fn test_dns_upstream_parse_udp_hostname() {
+        let upstream: DnsUpstream = "localhost:53".parse().unwrap();
+        match upstream {
+            DnsUpstream::Udp(addr) => {
+                assert!(addr.ip().is_loopback());
+                assert_eq!(addr.port(), 53);
+            }
             _ => panic!("expected Udp variant"),
         }
     }
