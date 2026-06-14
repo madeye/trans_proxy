@@ -161,11 +161,7 @@ pub fn uninstall() -> Result<()> {
 fn generate_unit(args: &[String]) -> String {
     let filtered_args = filter_service_args(args);
 
-    let exec_start = if filtered_args.is_empty() {
-        INSTALL_BIN.to_string()
-    } else {
-        format!("{} {}", INSTALL_BIN, filtered_args.join(" "))
-    };
+    let exec_start = systemd_command(INSTALL_BIN, &filtered_args);
 
     // Build --setup-firewall command from the same args
     let mut setup_args = Vec::new();
@@ -190,7 +186,7 @@ fn generate_unit(args: &[String]) -> String {
         }
     }
 
-    let setup_cmd = format!("{} {}", INSTALL_BIN, setup_args.join(" "));
+    let setup_cmd = systemd_command(INSTALL_BIN, &setup_args);
     let teardown_cmd = format!("{INSTALL_BIN} --teardown-firewall");
 
     format!(
@@ -217,6 +213,40 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 "#
     )
+}
+
+fn systemd_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program.to_string())
+        .chain(args.iter().map(|arg| systemd_quote_arg(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn systemd_quote_arg(arg: &str) -> String {
+    let escaped = arg.replace('%', "%%").replace('$', "$$");
+    if !escaped.is_empty()
+        && escaped.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'@' | b'_' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+                )
+        })
+    {
+        return escaped;
+    }
+
+    let mut quoted = String::with_capacity(escaped.len() + 2);
+    quoted.push('"');
+    for ch in escaped.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 #[cfg(test)]
@@ -367,5 +397,27 @@ mod tests {
         assert!(unit.contains("--ports 22,80,443"));
         assert!(unit.contains("--local-traffic"));
         assert!(unit.contains("--fwmark 5"));
+    }
+
+    #[test]
+    fn test_generate_unit_quotes_arguments() {
+        let args: Vec<String> = vec![
+            "--upstream-proxy".into(),
+            "127.0.0.1:1082".into(),
+            "--interface".into(),
+            "eth 0".into(),
+        ];
+        let unit = generate_unit(&args);
+
+        assert!(unit.contains("--interface \"eth 0\""));
+        assert!(!unit.contains("--interface eth 0"));
+    }
+
+    #[test]
+    fn test_systemd_quote_escapes_expansions() {
+        assert_eq!(systemd_quote_arg("eth%0"), "\"eth%%0\"");
+        assert_eq!(systemd_quote_arg("$IFACE"), "\"$$IFACE\"");
+        assert_eq!(systemd_quote_arg("eth\"0"), "\"eth\\\"0\"");
+        assert_eq!(systemd_quote_arg("eth\\0"), "\"eth\\\\0\"");
     }
 }
