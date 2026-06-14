@@ -78,12 +78,17 @@ sudo ./target/release/trans_proxy \
 #   --dns
 
 # Step 2: Set up pf redirection
-sudo scripts/pf_setup.sh en0 8443
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --dns --interface en0 \
+  --setup-firewall
 
 # Step 3: Configure client devices (see "Client Setup" below)
 
 # Step 4: When done, tear down
-sudo scripts/pf_teardown.sh
+sudo ./target/release/trans_proxy \
+  --upstream-proxy 127.0.0.1:1082 \
+  --teardown-firewall
 sudo kill $(cat /var/run/trans_proxy.pid)
 ```
 
@@ -98,12 +103,17 @@ sudo ./trans_proxy \
   --dns --interface eth0
 
 # Step 2: Set up nftables redirection
-sudo scripts/nftables_setup.sh eth0 8443
+sudo ./trans_proxy \
+  --upstream-proxy 127.0.0.1:7890 \
+  --dns --interface eth0 \
+  --setup-firewall
 
 # Step 3: Configure client devices (see "Client Setup" below)
 
 # Step 4: When done, tear down
-sudo scripts/nftables_teardown.sh
+sudo ./trans_proxy \
+  --upstream-proxy 127.0.0.1:7890 \
+  --teardown-firewall
 sudo kill $(cat /var/run/trans_proxy.pid)
 ```
 
@@ -194,30 +204,28 @@ sudo ./target/release/trans_proxy \
 
 #### macOS (pf)
 
-The included scripts manage pf rules via an anchor (won't interfere with existing firewall rules).
+The binary manages pf rules via an anchor (won't interfere with existing firewall rules).
 
 ```bash
-sudo scripts/pf_setup.sh <interface> [proxy_port] [upstream_proxy] [ports]
-sudo scripts/pf_setup.sh en0 8443                              # all TCP
-sudo scripts/pf_setup.sh en0 8443 "" 80,443                    # only ports 80,443
-sudo scripts/pf_setup.sh en0 8443 127.0.0.1:1082              # all TCP + local traffic
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --interface en0 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --interface en0 --ports 80,443 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --interface en0 --local-traffic --setup-firewall
 
 # Tear down
-sudo scripts/pf_teardown.sh
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:1082 --teardown-firewall
 ```
 
 #### Linux (nftables)
 
-The included scripts create a dedicated nftables table for trans_proxy.
+The binary creates a dedicated nftables table for trans_proxy.
 
 ```bash
-sudo scripts/nftables_setup.sh <interface> [proxy_port] [fwmark] [upstream_proxy] [ports]
-sudo scripts/nftables_setup.sh eth0 8443                                  # all TCP
-sudo scripts/nftables_setup.sh eth0 8443 "" "" 80,443                     # only ports 80,443
-sudo scripts/nftables_setup.sh eth0 8443 1 127.0.0.1:7890                # all TCP + local traffic
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --interface eth0 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --interface eth0 --ports 80,443 --setup-firewall
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --interface eth0 --local-traffic --setup-firewall
 
 # Tear down
-sudo scripts/nftables_teardown.sh
+sudo ./target/release/trans_proxy --upstream-proxy 127.0.0.1:7890 --teardown-firewall
 ```
 
 ### Linux Kernel Optimization

@@ -923,9 +923,12 @@
 
         <div class="step">
           <h3>设置 pf 重定向</h3>
-          <p>在另一个终端中安装 pf 规则（仅 HTTP/HTTPS &mdash; DNS 由程序直接处理）：</p>
-<pre class="code"><span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span></pre>
-          <p>脚本会输出您的网关 IP 和设置摘要。</p>
+          <p>在另一个终端中安装 pf 规则：</p>
+<pre class="code"><span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--dns</span> <span class="flag">--interface</span> <span class="value">en0</span> \
+  <span class="flag">--setup-firewall</span></pre>
+          <p>命令会输出您的网关 IP 和设置摘要。</p>
         </div>
 
         <div class="step">
@@ -935,7 +938,9 @@
 
         <div class="step">
           <h3>完成后清理</h3>
-<pre class="code"><span class="cmd">sudo scripts/pf_teardown.sh</span>
+<pre class="code"><span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--teardown-firewall</span>
 <span class="comment"># 如果以守护进程运行</span>
 <span class="cmd">sudo kill</span> <span class="value">$(cat /var/run/trans_proxy.pid)</span></pre>
         </div>
@@ -1019,13 +1024,17 @@
         </tbody>
       </table>
 
-      <h3 style="margin-top: 32px;">pf 脚本</h3>
-<pre class="code"><span class="comment"># 设置：pf_setup.sh &lt;interface&gt; [proxy_port]</span>
-<span class="comment"># DNS 不再需要 pf 重定向 &mdash; 直接监听端口 53</span>
-<span class="cmd">sudo scripts/pf_setup.sh</span> <span class="value">en0 8443</span>
+      <h3 style="margin-top: 32px;">防火墙命令</h3>
+<pre class="code"><span class="comment"># 设置：使用与运行中服务相同的代理和接口参数</span>
+<span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--interface</span> <span class="value">en0</span> \
+  <span class="flag">--setup-firewall</span>
 
 <span class="comment"># 清理：刷新锚点规则，禁用 IP 转发</span>
-<span class="cmd">sudo scripts/pf_teardown.sh</span></pre>
+<span class="cmd">sudo ./target/release/trans_proxy</span> \
+  <span class="flag">--upstream-proxy</span> <span class="value">127.0.0.1:1082</span> \
+  <span class="flag">--teardown-firewall</span></pre>
     </div>
   </section>
 
