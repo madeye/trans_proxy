@@ -11,7 +11,7 @@
 
 use clap::Parser;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 /// Upstream DNS target: either a UDP address or a DoH URL.
 #[derive(Debug, Clone)]
@@ -134,8 +134,7 @@ impl std::str::FromStr for UpstreamProxy {
             } else {
                 (ProxyAuth::None, rest)
             };
-            let addr: SocketAddr = addr_str
-                .parse()
+            let addr = parse_upstream_addr(addr_str)
                 .map_err(|e| format!("invalid socks5 address '{}': {}", addr_str, e))?;
             Ok(UpstreamProxy {
                 protocol: ProxyProtocol::Socks5(auth),
@@ -144,8 +143,7 @@ impl std::str::FromStr for UpstreamProxy {
         } else {
             // http://host:port or bare host:port
             let addr_str = s.strip_prefix("http://").unwrap_or(s);
-            let addr: SocketAddr = addr_str
-                .parse()
+            let addr = parse_upstream_addr(addr_str)
                 .map_err(|e| format!("invalid proxy address '{}': {}", addr_str, e))?;
             Ok(UpstreamProxy {
                 protocol: ProxyProtocol::HttpConnect,
@@ -166,6 +164,16 @@ fn validate_socks5_credential(label: &str, value: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn parse_upstream_addr(addr: &str) -> Result<SocketAddr, String> {
+    if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+        return Ok(socket_addr);
+    }
+    addr.to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .next()
+        .ok_or_else(|| "hostname resolved to no addresses".to_string())
 }
 
 /// Comma-separated list of TCP ports for firewall redirection.
@@ -458,6 +466,22 @@ mod tests {
     }
 
     #[test]
+    fn test_upstream_proxy_parse_hostname() {
+        let proxy: UpstreamProxy = "localhost:1082".parse().unwrap();
+        assert!(matches!(proxy.protocol, ProxyProtocol::HttpConnect));
+        assert!(proxy.addr.ip().is_loopback());
+        assert_eq!(proxy.addr.port(), 1082);
+    }
+
+    #[test]
+    fn test_upstream_proxy_parse_http_hostname() {
+        let proxy: UpstreamProxy = "http://localhost:1082".parse().unwrap();
+        assert!(matches!(proxy.protocol, ProxyProtocol::HttpConnect));
+        assert!(proxy.addr.ip().is_loopback());
+        assert_eq!(proxy.addr.port(), 1082);
+    }
+
+    #[test]
     fn test_upstream_proxy_parse_socks5() {
         let proxy: UpstreamProxy = "socks5://127.0.0.1:1080".parse().unwrap();
         assert!(matches!(
@@ -465,6 +489,17 @@ mod tests {
             ProxyProtocol::Socks5(ProxyAuth::None)
         ));
         assert_eq!(proxy.addr.to_string(), "127.0.0.1:1080");
+    }
+
+    #[test]
+    fn test_upstream_proxy_parse_socks5_hostname() {
+        let proxy: UpstreamProxy = "socks5://localhost:1080".parse().unwrap();
+        assert!(matches!(
+            proxy.protocol,
+            ProxyProtocol::Socks5(ProxyAuth::None)
+        ));
+        assert!(proxy.addr.ip().is_loopback());
+        assert_eq!(proxy.addr.port(), 1080);
     }
 
     #[test]
