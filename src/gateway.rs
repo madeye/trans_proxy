@@ -325,6 +325,15 @@ fn send_arp_packet(iface: &str, packet: &[u8]) -> Result<()> {
 }
 
 fn send_ra_packet(iface: &str, src_addr: Ipv6Addr, packet: &[u8]) -> Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn check_syscall(ret: libc::c_int, operation: &str) -> Result<()> {
+        if ret < 0 {
+            bail!("{} failed: {}", operation, std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     let ifindex = get_interface_index(iface)?;
     unsafe {
         let sock = libc::socket(libc::AF_INET6, libc::SOCK_RAW, libc::IPPROTO_ICMPV6);
@@ -334,40 +343,53 @@ fn send_ra_packet(iface: &str, src_addr: Ipv6Addr, packet: &[u8]) -> Result<()> 
                 std::io::Error::last_os_error()
             );
         }
+        let sock = OwnedFd::from_raw_fd(sock);
 
         let hops: libc::c_int = 255;
-        libc::setsockopt(
-            sock,
-            libc::IPPROTO_IPV6,
-            libc::IPV6_MULTICAST_HOPS,
-            &hops as *const libc::c_int as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        libc::setsockopt(
-            sock,
-            libc::IPPROTO_IPV6,
-            libc::IPV6_UNICAST_HOPS,
-            &hops as *const libc::c_int as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        libc::setsockopt(
-            sock,
-            libc::IPPROTO_IPV6,
-            libc::IPV6_MULTICAST_IF,
-            &ifindex as *const u32 as *const libc::c_void,
-            std::mem::size_of::<u32>() as libc::socklen_t,
-        );
+        check_syscall(
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MULTICAST_HOPS,
+                &hops as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ),
+            "setting IPv6 multicast hop limit",
+        )?;
+        check_syscall(
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_UNICAST_HOPS,
+                &hops as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ),
+            "setting IPv6 unicast hop limit",
+        )?;
+        check_syscall(
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MULTICAST_IF,
+                &ifindex as *const u32 as *const libc::c_void,
+                std::mem::size_of::<u32>() as libc::socklen_t,
+            ),
+            "setting IPv6 multicast interface",
+        )?;
 
         // Bind to source link-local address
         let mut bind_addr: libc::sockaddr_in6 = std::mem::zeroed();
         bind_addr.sin6_family = libc::AF_INET6 as libc::sa_family_t;
         bind_addr.sin6_addr.s6_addr = src_addr.octets();
         bind_addr.sin6_scope_id = ifindex;
-        libc::bind(
-            sock,
-            &bind_addr as *const libc::sockaddr_in6 as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-        );
+        check_syscall(
+            libc::bind(
+                sock.as_raw_fd(),
+                &bind_addr as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            ),
+            "binding RA socket to source address",
+        )?;
 
         // Destination: ff02::1 (all-nodes multicast)
         let mut dst: libc::sockaddr_in6 = std::mem::zeroed();
@@ -376,14 +398,13 @@ fn send_ra_packet(iface: &str, src_addr: Ipv6Addr, packet: &[u8]) -> Result<()> 
         dst.sin6_scope_id = ifindex;
 
         let ret = libc::sendto(
-            sock,
+            sock.as_raw_fd(),
             packet.as_ptr() as *const libc::c_void,
             packet.len(),
             0,
             &dst as *const libc::sockaddr_in6 as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
         );
-        libc::close(sock);
 
         if ret < 0 {
             bail!("RA sendto failed: {}", std::io::Error::last_os_error());
