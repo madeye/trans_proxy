@@ -738,7 +738,7 @@ async fn run_udp(
         listen_addr, upstream_dns
     );
 
-    let upstream_socket = UdpSocket::bind("0.0.0.0:0")
+    let upstream_socket = UdpSocket::bind(udp_unspecified_addr(upstream_dns))
         .await
         .context("Failed to bind upstream DNS socket")?;
     upstream_socket.connect(upstream_dns).await?;
@@ -900,6 +900,13 @@ async fn run_udp(
         if let Err(e) = upstream_socket.send(&buf[..n]).await {
             warn!("DNS: failed to forward query to upstream: {}", e);
         }
+    }
+}
+
+fn udp_unspecified_addr(upstream_dns: SocketAddr) -> SocketAddr {
+    match upstream_dns {
+        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
     }
 }
 
@@ -1609,6 +1616,18 @@ mod tests {
         assert_eq!(table_ttl(&pkt), TABLE_TTL_FLOOR);
         // No answers → default to the floor
         assert_eq!(table_ttl(&[0u8; 12]), TABLE_TTL_FLOOR);
+    }
+
+    #[test]
+    fn test_udp_unspecified_addr_matches_upstream_family() {
+        assert_eq!(
+            udp_unspecified_addr("8.8.8.8:53".parse().unwrap()),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+        );
+        assert_eq!(
+            udp_unspecified_addr("[2001:4860:4860::8888]:53".parse().unwrap()),
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+        );
     }
 
     /// Integration test: runs the UDP DNS forwarder with a fake upstream,
