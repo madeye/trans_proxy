@@ -190,13 +190,9 @@ fn anchor_referenced() -> bool {
 /// The anchor's own rules (loaded separately into the anchor) are unaffected
 /// by reloading the main ruleset.
 fn ensure_anchor_referenced() -> Result<()> {
-    let mut full_conf = std::fs::read_to_string(PF_CONF).unwrap_or_default();
-    if !full_conf.contains(&format!("rdr-anchor \"{ANCHOR}\"")) {
-        full_conf.push_str(&format!("\nrdr-anchor \"{ANCHOR}\"\n"));
-    }
-    if !full_conf.contains(&format!("anchor \"{ANCHOR}\"")) {
-        full_conf.push_str(&format!("anchor \"{ANCHOR}\"\n"));
-    }
+    let full_conf = std::fs::read_to_string(PF_CONF)
+        .with_context(|| format!("Failed to read {PF_CONF} before loading main pf ruleset"))?;
+    let full_conf = main_ruleset_with_anchor_references(&full_conf);
 
     let mut child = Command::new("pfctl")
         .args(["-f", "/dev/stdin"])
@@ -220,6 +216,31 @@ fn ensure_anchor_referenced() -> Result<()> {
         bail!("pfctl failed to load main ruleset with anchor references: {stderr}");
     }
     Ok(())
+}
+
+fn main_ruleset_with_anchor_references(base: &str) -> String {
+    let mut full_conf = base.to_string();
+    let rdr_anchor = format!("rdr-anchor \"{ANCHOR}\"");
+    let anchor = format!("anchor \"{ANCHOR}\"");
+    if !has_pf_conf_line(&full_conf, &rdr_anchor) {
+        append_pf_conf_line(&mut full_conf, &rdr_anchor);
+    }
+    if !has_pf_conf_line(&full_conf, &anchor) {
+        append_pf_conf_line(&mut full_conf, &anchor);
+    }
+    full_conf
+}
+
+fn has_pf_conf_line(conf: &str, line: &str) -> bool {
+    conf.lines().any(|candidate| candidate.trim() == line)
+}
+
+fn append_pf_conf_line(conf: &mut String, line: &str) {
+    if !conf.is_empty() && !conf.ends_with('\n') {
+        conf.push('\n');
+    }
+    conf.push_str(line);
+    conf.push('\n');
 }
 
 fn load_pf_rules(rules: &str) -> Result<()> {
@@ -342,5 +363,53 @@ mod tests {
         );
         assert!(rules
             .contains("no rdr on en0 inet6 proto tcp from any to 2001:db8:1:2::1 port {80, 443}"));
+    }
+
+    #[test]
+    fn preserves_existing_rules_and_appends_anchor_references() {
+        let input = "scrub-anchor \"com.apple/*\"\n";
+
+        let output = main_ruleset_with_anchor_references(input);
+
+        assert!(output.starts_with(input));
+        assert!(output.contains("rdr-anchor \"trans_proxy\"\n"));
+        assert!(output.contains("anchor \"trans_proxy\"\n"));
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_anchor_references() {
+        let input = concat!(
+            "scrub-anchor \"com.apple/*\"\n",
+            "rdr-anchor \"trans_proxy\"\n",
+            "anchor \"trans_proxy\"\n"
+        );
+
+        let output = main_ruleset_with_anchor_references(input);
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn inserts_separator_after_file_without_trailing_newline() {
+        let output = main_ruleset_with_anchor_references("scrub-anchor \"com.apple/*\"");
+
+        assert_eq!(
+            output,
+            concat!(
+                "scrub-anchor \"com.apple/*\"\n",
+                "rdr-anchor \"trans_proxy\"\n",
+                "anchor \"trans_proxy\"\n"
+            )
+        );
+    }
+
+    #[test]
+    fn treats_rdr_anchor_and_filter_anchor_as_distinct_references() {
+        let output = main_ruleset_with_anchor_references("rdr-anchor \"trans_proxy\"\n");
+
+        assert_eq!(
+            output,
+            concat!("rdr-anchor \"trans_proxy\"\n", "anchor \"trans_proxy\"\n")
+        );
     }
 }
