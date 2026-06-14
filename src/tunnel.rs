@@ -114,20 +114,7 @@ async fn handshake_http_connect(
     dest: SocketAddr,
     hostname: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let host = match hostname.filter(|h| is_valid_proxy_hostname(h)) {
-        Some(h) => h.to_string(),
-        None => match dest.ip() {
-            IpAddr::V6(ip) => format!("[{}]", ip),
-            ip => ip.to_string(),
-        },
-    };
-    let request = format!(
-        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n",
-        host,
-        dest.port(),
-        host,
-        dest.port()
-    );
+    let request = http_connect_request(dest, hostname);
 
     timeout(CONNECT_TIMEOUT, stream.write_all(request.as_bytes()))
         .await
@@ -223,30 +210,7 @@ async fn handshake_socks5(
     }
 
     // Step 2: CONNECT request
-    let mut req = vec![
-        0x05, // version
-        0x01, // CMD: CONNECT
-        0x00, // reserved
-    ];
-
-    match hostname.filter(|h| is_valid_proxy_hostname(h)) {
-        Some(h) if h.len() <= 255 => {
-            req.push(0x03);
-            req.push(h.len() as u8);
-            req.extend_from_slice(h.as_bytes());
-        }
-        _ => match dest.ip() {
-            IpAddr::V4(ip) => {
-                req.push(0x01);
-                req.extend_from_slice(&ip.octets());
-            }
-            IpAddr::V6(ip) => {
-                req.push(0x04);
-                req.extend_from_slice(&ip.octets());
-            }
-        },
-    }
-    req.extend_from_slice(&dest.port().to_be_bytes());
+    let req = socks5_connect_request(dest, hostname);
 
     timeout(CONNECT_TIMEOUT, stream.write_all(&req))
         .await
@@ -311,6 +275,72 @@ async fn handshake_socks5(
     Ok(())
 }
 
+fn http_connect_request(dest: SocketAddr, hostname: Option<&str>) -> String {
+    let host = proxy_request_host(dest, hostname);
+    format!(
+        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n",
+        host,
+        dest.port(),
+        host,
+        dest.port()
+    )
+}
+
+fn socks5_connect_request(dest: SocketAddr, hostname: Option<&str>) -> Vec<u8> {
+    let mut req = vec![
+        0x05, // version
+        0x01, // CMD: CONNECT
+        0x00, // reserved
+    ];
+
+    match usable_proxy_hostname(hostname) {
+        Some(h) => {
+            req.push(0x03);
+            req.push(h.len() as u8);
+            req.extend_from_slice(h.as_bytes());
+        }
+        None => match dest.ip() {
+            IpAddr::V4(ip) => {
+                req.push(0x01);
+                req.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                req.push(0x04);
+                req.extend_from_slice(&ip.octets());
+            }
+        },
+    }
+    req.extend_from_slice(&dest.port().to_be_bytes());
+    req
+}
+
+fn proxy_request_host(dest: SocketAddr, hostname: Option<&str>) -> String {
+    match usable_proxy_hostname(hostname) {
+        Some(h) => h.to_string(),
+        None => match dest.ip() {
+            IpAddr::V6(ip) => format!("[{}]", ip),
+            ip => ip.to_string(),
+        },
+    }
+}
+
+fn usable_proxy_hostname(hostname: Option<&str>) -> Option<&str> {
+    hostname.filter(|host| is_safe_proxy_hostname(host))
+}
+
+fn is_safe_proxy_hostname(host: &str) -> bool {
+    let name = host.strip_suffix('.').unwrap_or(host);
+    !name.is_empty()
+        && host.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_'))
+        })
+}
+
 /// SOCKS5 username/password sub-negotiation (RFC 1929).
 async fn socks5_username_auth(
     stream: &mut TcpStream,
@@ -338,31 +368,6 @@ async fn socks5_username_auth(
     }
 
     Ok(())
-}
-
-/// Accept only DNS hostnames that are safe to embed in upstream proxy
-/// protocol frames. Invalid SNI/DNS names fall back to the original IP.
-fn is_valid_proxy_hostname(hostname: &str) -> bool {
-    let hostname = hostname.strip_suffix('.').unwrap_or(hostname);
-    if hostname.is_empty() || hostname.len() > 253 {
-        return false;
-    }
-
-    hostname.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && label
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            && label
-                .as_bytes()
-                .first()
-                .is_some_and(|b| b.is_ascii_alphanumeric())
-            && label
-                .as_bytes()
-                .last()
-                .is_some_and(|b| b.is_ascii_alphanumeric())
-    })
 }
 
 fn build_socks5_auth_request(username: &str, password: &str) -> Result<Vec<u8>> {
@@ -517,26 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn test_proxy_hostname_validation() {
-        assert!(is_valid_proxy_hostname("example.com"));
-        assert!(is_valid_proxy_hostname("xn--bcher-kva.example."));
-
-        assert!(!is_valid_proxy_hostname(""));
-        assert!(!is_valid_proxy_hostname("bad host.example"));
-        assert!(!is_valid_proxy_hostname("bad\r\nInjected: yes"));
-        assert!(!is_valid_proxy_hostname("-bad.example"));
-        assert!(!is_valid_proxy_hostname("bad-.example"));
-        assert!(!is_valid_proxy_hostname(&format!(
-            "{}.example",
-            "a".repeat(64)
-        )));
-        assert!(!is_valid_proxy_hostname(&format!(
-            "{}.com",
-            "a".repeat(254)
-        )));
-    }
-
-    #[test]
     fn test_socks5_auth_request_encodes_field_lengths() {
         let req = build_socks5_auth_request("user", "pass").unwrap();
 
@@ -549,6 +534,75 @@ mod tests {
         assert!(build_socks5_auth_request("user", "").is_err());
         assert!(build_socks5_auth_request(&"u".repeat(256), "pass").is_err());
         assert!(build_socks5_auth_request("user", &"p".repeat(256)).is_err());
+    }
+
+    #[test]
+    fn test_http_connect_request_uses_valid_hostname() {
+        let dest: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let request = http_connect_request(dest, Some("example.com"));
+
+        assert_eq!(
+            request,
+            "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn test_http_connect_request_falls_back_for_injected_hostname() {
+        let dest: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let request = http_connect_request(dest, Some("good.com\r\nX-Bad: yes"));
+
+        assert_eq!(
+            request,
+            "CONNECT 93.184.216.34:443 HTTP/1.1\r\nHost: 93.184.216.34:443\r\n\r\n"
+        );
+        assert!(!request.contains("X-Bad"));
+    }
+
+    #[test]
+    fn test_socks5_connect_request_uses_valid_hostname() {
+        let dest: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let request = socks5_connect_request(dest, Some("example.com"));
+
+        assert_eq!(
+            request,
+            vec![
+                0x05, 0x01, 0x00, // SOCKS5 CONNECT header
+                0x03, 0x0b, // domain address type and length
+                b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm', 0x01,
+                0xbb, // port 443
+            ]
+        );
+    }
+
+    #[test]
+    fn test_socks5_connect_request_falls_back_for_invalid_hostname() {
+        let dest: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let request = socks5_connect_request(dest, Some("good.com\r\nbad"));
+
+        assert_eq!(
+            request,
+            vec![
+                0x05, 0x01, 0x00, // SOCKS5 CONNECT header
+                0x01, // IPv4 address type
+                93, 184, 216, 34, // destination IP
+                0x01, 0xbb, // port 443
+            ]
+        );
+        assert!(!request.windows(b"good.com".len()).any(|w| w == b"good.com"));
+    }
+
+    #[test]
+    fn test_proxy_hostname_validation() {
+        assert!(is_safe_proxy_hostname("example.com"));
+        assert!(is_safe_proxy_hostname("service_name.example.com."));
+        assert!(!is_safe_proxy_hostname(""));
+        assert!(!is_safe_proxy_hostname(".example.com"));
+        assert!(!is_safe_proxy_hostname("example..com"));
+        assert!(!is_safe_proxy_hostname("example.com:443"));
+        assert!(!is_safe_proxy_hostname("example.com/path"));
+        assert!(!is_safe_proxy_hostname("example.com\r\nInjected: yes"));
+        assert!(!is_safe_proxy_hostname("例子.example"));
     }
 
     /// Run handshake_http_connect against a fake proxy that replies with
