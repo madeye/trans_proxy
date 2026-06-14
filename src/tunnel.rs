@@ -42,6 +42,7 @@ use crate::config::{ProxyAuth, ProxyProtocol, UpstreamProxy};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_SIZE: usize = 8192;
+const MAX_SOCKS5_FIELD_LEN: usize = 255;
 
 /// Establish a tunnel through the upstream proxy to the given destination.
 ///
@@ -113,7 +114,7 @@ async fn handshake_http_connect(
     dest: SocketAddr,
     hostname: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let host = match hostname {
+    let host = match hostname.filter(|h| is_valid_proxy_hostname(h)) {
         Some(h) => h.to_string(),
         None => match dest.ip() {
             IpAddr::V6(ip) => format!("[{}]", ip),
@@ -228,7 +229,7 @@ async fn handshake_socks5(
         0x00, // reserved
     ];
 
-    match hostname {
+    match hostname.filter(|h| is_valid_proxy_hostname(h)) {
         Some(h) if h.len() <= 255 => {
             req.push(0x03);
             req.push(h.len() as u8);
@@ -316,6 +317,21 @@ async fn socks5_username_auth(
     username: &str,
     password: &str,
 ) -> Result<()> {
+    if username.len() > MAX_SOCKS5_FIELD_LEN {
+        bail!(
+            "SOCKS5: username is {} bytes, maximum is {}",
+            username.len(),
+            MAX_SOCKS5_FIELD_LEN
+        );
+    }
+    if password.len() > MAX_SOCKS5_FIELD_LEN {
+        bail!(
+            "SOCKS5: password is {} bytes, maximum is {}",
+            password.len(),
+            MAX_SOCKS5_FIELD_LEN
+        );
+    }
+
     let mut auth_req = vec![0x01]; // sub-negotiation version
     auth_req.push(username.len() as u8);
     auth_req.extend_from_slice(username.as_bytes());
@@ -341,6 +357,31 @@ async fn socks5_username_auth(
     }
 
     Ok(())
+}
+
+/// Accept only DNS hostnames that are safe to embed in upstream proxy
+/// protocol frames. Invalid SNI/DNS names fall back to the original IP.
+fn is_valid_proxy_hostname(hostname: &str) -> bool {
+    let hostname = hostname.strip_suffix('.').unwrap_or(hostname);
+    if hostname.is_empty() || hostname.len() > 253 {
+        return false;
+    }
+
+    hostname.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && label
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+            && label
+                .as_bytes()
+                .last()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+    })
 }
 
 /// Map a SOCKS5 reply status byte to a human-readable error message.
@@ -471,9 +512,39 @@ mod tests {
         assert_eq!(socks5_error_message(0xFF), "unknown error");
     }
 
+    #[test]
+    fn test_proxy_hostname_validation() {
+        assert!(is_valid_proxy_hostname("example.com"));
+        assert!(is_valid_proxy_hostname("xn--bcher-kva.example."));
+
+        assert!(!is_valid_proxy_hostname(""));
+        assert!(!is_valid_proxy_hostname("bad host.example"));
+        assert!(!is_valid_proxy_hostname("bad\r\nInjected: yes"));
+        assert!(!is_valid_proxy_hostname("-bad.example"));
+        assert!(!is_valid_proxy_hostname("bad-.example"));
+        assert!(!is_valid_proxy_hostname(&format!(
+            "{}.example",
+            "a".repeat(64)
+        )));
+        assert!(!is_valid_proxy_hostname(&format!(
+            "{}.com",
+            "a".repeat(254)
+        )));
+    }
+
     /// Run handshake_http_connect against a fake proxy that replies with
     /// `response` in a single write, returning the leftover bytes.
     async fn run_connect_handshake(response: &'static [u8]) -> Result<Vec<u8>> {
+        let (leftover, _) = run_connect_handshake_capture(response, Some("example.com")).await?;
+        Ok(leftover)
+    }
+
+    /// Run handshake_http_connect and capture the CONNECT request sent to the
+    /// fake proxy.
+    async fn run_connect_handshake_capture(
+        response: &'static [u8],
+        hostname: Option<&str>,
+    ) -> Result<(Vec<u8>, String)> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
 
@@ -490,15 +561,16 @@ mod tests {
                     break;
                 }
             }
+            let request = String::from_utf8_lossy(&buf[..filled]).to_string();
             stream.write_all(response).await.unwrap();
-            stream
+            request
         });
 
         let mut stream = TcpStream::connect(addr).await?;
         let dest: SocketAddr = "93.184.216.34:443".parse()?;
-        let leftover = handshake_http_connect(&mut stream, dest, Some("example.com")).await?;
-        server.await.unwrap();
-        Ok(leftover)
+        let leftover = handshake_http_connect(&mut stream, dest, hostname).await?;
+        let request = server.await.unwrap();
+        Ok((leftover, request))
     }
 
     #[tokio::test]
@@ -525,5 +597,47 @@ mod tests {
     async fn test_http_connect_failure_status() {
         let result = run_connect_handshake(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_invalid_hostname_falls_back_to_ip() {
+        let (_, request) = run_connect_handshake_capture(
+            b"HTTP/1.1 200 Connection established\r\n\r\n",
+            Some("bad\r\nInjected: yes"),
+        )
+        .await
+        .unwrap();
+
+        assert!(request.starts_with("CONNECT 93.184.216.34:443 HTTP/1.1\r\n"));
+        assert!(!request.contains("Injected: yes"));
+    }
+
+    #[tokio::test]
+    async fn test_socks5_auth_rejects_overlong_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 4];
+            stream.read_exact(&mut greeting).await.unwrap();
+            stream.write_all(&[0x05, 0x02]).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let auth = ProxyAuth::UsernamePassword {
+            username: "u".repeat(MAX_SOCKS5_FIELD_LEN + 1),
+            password: "p".to_string(),
+        };
+        let err = handshake_socks5(
+            &mut stream,
+            "93.184.216.34:443".parse().unwrap(),
+            Some("example.com"),
+            &auth,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("username is 256 bytes"));
+        server.await.unwrap();
     }
 }
