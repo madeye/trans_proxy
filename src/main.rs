@@ -74,7 +74,7 @@ mod service;
 mod sni;
 mod tunnel;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -162,49 +162,60 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async {
-        let dns_table = DnsTable::new();
+        let server = async {
+            let dns_table = DnsTable::new();
 
-        let dns_task = if let Some(dns_listen) = config.resolve_dns_listen() {
-            let table = dns_table.clone();
-            let upstream = config.dns_upstream.clone();
-            let upstream_proxy = config
-                .upstream_proxy
-                .clone()
-                .expect("upstream proxy is required when DNS forwarding runs");
-            let strip_aaaa = config.dns_strip_aaaa;
-            let handle = tokio::spawn(async move {
-                dns::run(dns_listen, upstream, table, &upstream_proxy, strip_aaaa).await
-            });
-            info!("DNS forwarder started on {}", dns_listen);
-            Some(handle)
-        } else {
-            None
+            let dns_task = if let Some(dns_listen) = config.resolve_dns_listen() {
+                let table = dns_table.clone();
+                let upstream = config.dns_upstream.clone();
+                let upstream_proxy = config
+                    .upstream_proxy
+                    .clone()
+                    .expect("upstream proxy is required when DNS forwarding runs");
+                let strip_aaaa = config.dns_strip_aaaa;
+                let handle = tokio::spawn(async move {
+                    dns::run(dns_listen, upstream, table, &upstream_proxy, strip_aaaa).await
+                });
+                info!("DNS forwarder started on {}", dns_listen);
+                Some(handle)
+            } else {
+                None
+            };
+
+            if config.gateway {
+                let iface = config.interface.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = gateway::run(&iface).await {
+                        tracing::error!("Gateway advertisement failed: {:#}", e);
+                    }
+                });
+            }
+
+            // The firewall redirects all LAN port-53 traffic to the DNS forwarder,
+            // so a dead forwarder silently blackholes DNS for every client. Treat
+            // forwarder exit as fatal so the service manager can restart us (and
+            // ExecStopPost / teardown can clean up the firewall rules).
+            if let Some(dns_task) = dns_task {
+                tokio::select! {
+                    res = proxy::run(config, dns_table) => res,
+                    res = dns_task => match res {
+                        Ok(Ok(())) => Err(anyhow::anyhow!("DNS forwarder exited unexpectedly")),
+                        Ok(Err(e)) => Err(e.context("DNS forwarder failed")),
+                        Err(e) => Err(anyhow::anyhow!("DNS forwarder task panicked: {e}")),
+                    },
+                }
+            } else {
+                proxy::run(config, dns_table).await
+            }
         };
 
-        if config.gateway {
-            let iface = config.interface.clone();
-            tokio::spawn(async move {
-                if let Err(e) = gateway::run(&iface).await {
-                    tracing::error!("Gateway advertisement failed: {:#}", e);
-                }
-            });
-        }
-
-        // The firewall redirects all LAN port-53 traffic to the DNS forwarder,
-        // so a dead forwarder silently blackholes DNS for every client. Treat
-        // forwarder exit as fatal so the service manager can restart us (and
-        // ExecStopPost / teardown can clean up the firewall rules).
-        if let Some(dns_task) = dns_task {
-            tokio::select! {
-                res = proxy::run(config, dns_table) => res,
-                res = dns_task => match res {
-                    Ok(Ok(())) => Err(anyhow::anyhow!("DNS forwarder exited unexpectedly")),
-                    Ok(Err(e)) => Err(e.context("DNS forwarder failed")),
-                    Err(e) => Err(anyhow::anyhow!("DNS forwarder task panicked: {e}")),
-                },
+        tokio::select! {
+            res = server => res,
+            res = shutdown_signal() => {
+                let signal = res?;
+                info!("Received {}, shutting down", signal);
+                Ok(())
             }
-        } else {
-            proxy::run(config, dns_table).await
         }
     });
 
@@ -214,4 +225,26 @@ fn main() -> Result<()> {
     }
 
     result
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> Result<&'static str> {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("failed to install SIGTERM handler")?;
+
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            res.context("failed to install Ctrl-C handler")?;
+            Ok("SIGINT")
+        }
+        _ = sigterm.recv() => Ok("SIGTERM"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> Result<&'static str> {
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to install Ctrl-C handler")?;
+    Ok("SIGINT")
 }
