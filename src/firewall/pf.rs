@@ -14,91 +14,7 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
     run_cmd("sysctl", &["-w", "net.inet6.ip6.forwarding=1"])?;
 
     let addrs = get_interface_ips(&config.interface);
-    let iface = &config.interface;
-    let port = config.proxy_port;
-
-    // Build port filter clause
-    let (port_filter, ssh_bypass) = if let Some(ref ports) = config.ports {
-        let port_list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
-        let filter = format!(" port {{{}}}", port_list.join(", "));
-        (filter, String::new())
-    } else {
-        let bypass = if let Some(ip4) = addrs.ipv4 {
-            format!("pass in quick on {iface} proto tcp from any to {ip4} port 22\n")
-        } else {
-            String::new()
-        };
-        (String::new(), bypass)
-    };
-
-    // IPv6 SSH bypass
-    let ssh6_bypass = if config.ports.is_none() {
-        if let Some(ip6) = addrs.ipv6 {
-            format!("pass in quick on {iface} inet6 proto tcp from any to {ip6} port 22\n")
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-
-    // DNS interception rules, targeting the resolved forwarder listen address
-    let dns_rdr = if config.dns_listen.is_some() {
-        let mut rules = String::new();
-        if let Some((ip4, dns_port)) = config.dns_target_v4(addrs.ipv4) {
-            rules.push_str(&format!(
-                "rdr on {iface} inet proto udp from any to any port 53 -> {ip4} port {dns_port}\n\
-                 rdr on {iface} inet proto tcp from any to any port 53 -> {ip4} port {dns_port}\n"
-            ));
-        }
-        if let Some((ip6, dns_port)) = config.dns_target_v6(addrs.ipv6) {
-            rules.push_str(&format!(
-                "rdr on {iface} inet6 proto udp from any to any port 53 -> {ip6} port {dns_port}\n\
-                 rdr on {iface} inet6 proto tcp from any to any port 53 -> {ip6} port {dns_port}\n"
-            ));
-        }
-        rules
-    } else {
-        String::new()
-    };
-
-    // Build the anchor rules
-    let rules = if let Some(upstream) = config.upstream_addr {
-        let up_ip = upstream.ip();
-        let up_port = upstream.port();
-        // Exempt the upstream proxy and our own listener from the lo0 rdr
-        // below. Without this, a localhost upstream (e.g. 127.0.0.1:1082)
-        // would be redirected back into the proxy's listener: the proxy's
-        // own tunnel connections and the DoH client loop forever.
-        // `no rdr` rules must precede the matching rdr rules.
-        let up_af = match up_ip {
-            IpAddr::V4(_) => "inet",
-            IpAddr::V6(_) => "inet6",
-        };
-        let no_rdr = format!(
-            "no rdr on lo0 {up_af} proto tcp from any to {up_ip} port {up_port}\n\
-             no rdr on lo0 inet proto tcp from any to any port {port}\n\
-             no rdr on lo0 inet6 proto tcp from any to any port {port}\n"
-        );
-        format!(
-            "{no_rdr}{dns_rdr}\
-             rdr on {iface} inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
-             rdr on lo0 inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
-             rdr on {iface} inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
-             rdr on lo0 inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
-             {ssh_bypass}{ssh6_bypass}\
-             pass out quick on {iface} proto tcp from any to {up_ip} port {up_port}\n\
-             pass out on {iface} inet route-to (lo0 127.0.0.1) proto tcp from any to any{port_filter}\n\
-             pass out on {iface} inet6 route-to (lo0 ::1) proto tcp from any to any{port_filter}"
-        )
-    } else {
-        format!(
-            "{dns_rdr}\
-             rdr on {iface} inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
-             rdr on {iface} inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
-             {ssh_bypass}{ssh6_bypass}"
-        )
-    };
+    let rules = build_rules(config, &addrs);
 
     println!("==> Loading pf anchor '{ANCHOR}'");
 
@@ -125,13 +41,17 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
     println!();
     println!("Done.");
     if let Some(ip4) = addrs.ipv4 {
-        println!("  Gateway IP:  {ip4} ({iface})");
+        println!("  Gateway IP:  {ip4} ({})", config.interface);
     }
     if let Some(ref ports) = config.ports {
         let port_list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
-        println!("  Ports:       {} -> 127.0.0.1:{port}", port_list.join(","));
+        println!(
+            "  Ports:       {} -> 127.0.0.1:{}",
+            port_list.join(","),
+            config.proxy_port
+        );
     } else {
-        println!("  Ports:       all TCP -> 127.0.0.1:{port}");
+        println!("  Ports:       all TCP -> 127.0.0.1:{}", config.proxy_port);
     }
     if let Some(upstream) = config.upstream_addr {
         println!("  Upstream:    {upstream} (excluded from interception)");
@@ -155,6 +75,91 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn build_rules(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> String {
+    let iface = &config.interface;
+    let port = config.proxy_port;
+
+    // Build port filter clause
+    let port_filter = if let Some(ref ports) = config.ports {
+        let port_list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+        format!(" port {{{}}}", port_list.join(", "))
+    } else {
+        String::new()
+    };
+
+    // DNS interception rules, targeting the resolved forwarder listen address
+    let dns_rdr = if config.dns_listen.is_some() {
+        let mut rules = String::new();
+        if let Some((ip4, dns_port)) = config.dns_target_v4(addrs.ipv4) {
+            rules.push_str(&format!(
+                "rdr on {iface} inet proto udp from any to any port 53 -> {ip4} port {dns_port}\n\
+                 rdr on {iface} inet proto tcp from any to any port 53 -> {ip4} port {dns_port}\n"
+            ));
+        }
+        if let Some((ip6, dns_port)) = config.dns_target_v6(addrs.ipv6) {
+            rules.push_str(&format!(
+                "rdr on {iface} inet6 proto udp from any to any port 53 -> {ip6} port {dns_port}\n\
+                 rdr on {iface} inet6 proto tcp from any to any port 53 -> {ip6} port {dns_port}\n"
+            ));
+        }
+        rules
+    } else {
+        String::new()
+    };
+
+    // Never transparent-proxy traffic addressed to the gateway itself (for
+    // example LAN clients reaching SSH or another service on this machine).
+    // pf translation rules are evaluated before filter `pass` rules, so this
+    // must be a `no rdr` rule and it must precede the broad TCP redirects.
+    let mut local_no_rdr = String::new();
+    if let Some(ip4) = addrs.ipv4 {
+        local_no_rdr.push_str(&format!(
+            "no rdr on {iface} inet proto tcp from any to {ip4}{port_filter}\n"
+        ));
+    }
+    if let Some(ip6) = addrs.ipv6 {
+        local_no_rdr.push_str(&format!(
+            "no rdr on {iface} inet6 proto tcp from any to {ip6}{port_filter}\n"
+        ));
+    }
+
+    // Build the anchor rules
+    if let Some(upstream) = config.upstream_addr {
+        let up_ip = upstream.ip();
+        let up_port = upstream.port();
+        // Exempt the upstream proxy and our own listener from the lo0 rdr
+        // below. Without this, a localhost upstream (e.g. 127.0.0.1:1082)
+        // would be redirected back into the proxy's listener: the proxy's
+        // own tunnel connections and the DoH client loop forever.
+        // `no rdr` rules must precede the matching rdr rules.
+        let up_af = match up_ip {
+            IpAddr::V4(_) => "inet",
+            IpAddr::V6(_) => "inet6",
+        };
+        let no_rdr = format!(
+            "no rdr on lo0 {up_af} proto tcp from any to {up_ip} port {up_port}\n\
+             no rdr on lo0 inet proto tcp from any to any port {port}\n\
+             no rdr on lo0 inet6 proto tcp from any to any port {port}\n"
+        );
+        format!(
+            "{no_rdr}{dns_rdr}{local_no_rdr}\
+             rdr on {iface} inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
+             rdr on lo0 inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
+             rdr on {iface} inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
+             rdr on lo0 inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
+             pass out quick on {iface} proto tcp from any to {up_ip} port {up_port}\n\
+             pass out on {iface} inet route-to (lo0 127.0.0.1) proto tcp from any to any{port_filter}\n\
+             pass out on {iface} inet6 route-to (lo0 ::1) proto tcp from any to any{port_filter}"
+        )
+    } else {
+        format!(
+            "{dns_rdr}{local_no_rdr}\
+             rdr on {iface} inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
+             rdr on {iface} inet6 proto tcp from any to any{port_filter} -> ::1 port {port}"
+        )
+    }
 }
 
 /// Check whether the live main pf ruleset already references our anchor.
@@ -264,4 +269,78 @@ pub fn teardown() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    fn config(ports: Option<Vec<u16>>, dns_listen: Option<SocketAddr>) -> FirewallConfig {
+        FirewallConfig {
+            interface: "en0".to_string(),
+            proxy_port: 8443,
+            fwmark: None,
+            upstream_addr: None,
+            ports,
+            dns_listen,
+        }
+    }
+
+    fn addrs() -> super::super::InterfaceAddrs {
+        super::super::InterfaceAddrs {
+            ipv4: Some(Ipv4Addr::new(192, 168, 1, 1)),
+            ipv6: Some(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, 1)),
+        }
+    }
+
+    #[test]
+    fn test_gateway_local_no_rdr_precedes_catch_all_redirects() {
+        let rules = build_rules(&config(None, None), &addrs());
+
+        let no_rdr_v4 = rules
+            .find("no rdr on en0 inet proto tcp from any to 192.168.1.1\n")
+            .unwrap();
+        let rdr_v4 = rules
+            .find("rdr on en0 inet proto tcp from any to any -> 127.0.0.1 port 8443")
+            .unwrap();
+        let no_rdr_v6 = rules
+            .find("no rdr on en0 inet6 proto tcp from any to 2001:db8:1:2::1\n")
+            .unwrap();
+        let rdr_v6 = rules
+            .find("rdr on en0 inet6 proto tcp from any to any -> ::1 port 8443")
+            .unwrap();
+
+        assert!(no_rdr_v4 < rdr_v4);
+        assert!(no_rdr_v6 < rdr_v6);
+        assert!(!rules.contains("pass in quick on en0"));
+    }
+
+    #[test]
+    fn test_dns_redirect_precedes_gateway_local_no_rdr() {
+        let rules = build_rules(
+            &config(None, Some("192.168.1.1:5353".parse().unwrap())),
+            &addrs(),
+        );
+
+        let dns_rdr = rules
+            .find("rdr on en0 inet proto tcp from any to any port 53 -> 192.168.1.1 port 5353")
+            .unwrap();
+        let local_no_rdr = rules
+            .find("no rdr on en0 inet proto tcp from any to 192.168.1.1\n")
+            .unwrap();
+
+        assert!(dns_rdr < local_no_rdr);
+    }
+
+    #[test]
+    fn test_gateway_local_no_rdr_respects_port_filter() {
+        let rules = build_rules(&config(Some(vec![80, 443]), None), &addrs());
+
+        assert!(
+            rules.contains("no rdr on en0 inet proto tcp from any to 192.168.1.1 port {80, 443}")
+        );
+        assert!(rules
+            .contains("no rdr on en0 inet6 proto tcp from any to 2001:db8:1:2::1 port {80, 443}"));
+    }
 }
