@@ -197,6 +197,7 @@ sudo ./target/release/trans_proxy \
 | `--local-traffic` | 关闭 | 同时拦截网关本机发出的流量（不仅仅是转发的局域网流量） |
 | `--fwmark` | `1` | Linux 上用于防止回环的防火墙标记（与 `--local-traffic` 配合使用） |
 | `--ports` | *（所有 TCP）* | 要重定向的 TCP 端口列表，逗号分隔（例如 `22,80,443`）。未指定时重定向所有 TCP 流量 |
+| `--allow-quic` | 关闭 | 允许 QUIC / HTTP-3（UDP）不经代理直接放行。默认情况下防火墙会丢弃转发的 QUIC（UDP 443，或每个 `--ports` 端口对应的 UDP 端口），防止其绕过仅支持 TCP 的代理——详见 [QUIC / HTTP-3 处理](#quic--http-3-处理) |
 | `--install` | 关闭 | 安装为系统服务（macOS 使用 launchd，Linux 使用 systemd） |
 | `--uninstall` | 关闭 | 卸载系统服务 |
 
@@ -292,6 +293,18 @@ sudo ./target/release/trans_proxy \
 
 - **Linux**：在出站 socket 上设置 `SO_MARK`（fwmark），nftables OUTPUT 链跳过带标记的数据包
 - **macOS**：当上游代理在本地时，设置 `IP_BOUND_IF` 将出站 socket 绑定到 `lo0`，并通过 `pass out quick` pf 规则排除上游代理目标地址
+
+### QUIC / HTTP-3 处理
+
+trans_proxy **仅中继 TCP**——SOCKS5（`CONNECT`）和 HTTP `CONNECT` 隧道都承载 TCP，防火墙也只重定向 TCP。QUIC / HTTP-3 走 **UDP**（通常为 443 端口），而透明 TCP 代理无法隧道传输（HTTP `CONNECT` 没有 UDP 模式，也没有 SOCKS5 `UDP ASSOCIATE` 数据报路径）。若不处理，转发的 QUIC 会被直接路由到目标，**完全绕过上游代理**——而由于浏览器（Chrome、Edge、Firefox）优先使用 HTTP/3，大量看似 "HTTPS" 的流量会悄悄逃逸，泄露客户端 IP 和目标地址。
+
+为防止这种情况，防火墙会**丢弃转发的 QUIC**，使客户端透明回退到 TCP（HTTP/1.1 / HTTP/2），而后者*是*经过代理的：
+
+- 全 TCP 模式（未指定 `--ports`）：丢弃 UDP **443**，即既定的 HTTP/3 端口。
+- 指定 `--ports` 时：丢弃每个被重定向 TCP 端口对应的 **UDP 端口**（53 端口除外——它由 DNS 转发器处理）。
+- 在 Linux 上，这是挂在 `forward` 钩子上的 `filter` 链（启用 `--local-traffic` 时还包括 `output` 钩子）；在 macOS 上则是 `block drop quick … proto udp` 的 pf 规则。
+
+其他无关的 UDP（VPN、VoIP、NTP、游戏）不受影响。传入 `--allow-quic` 可完全禁用此丢弃——仅在 QUIC 由其他方式处理、或你明确希望它绕过代理时才这样做。其设计理念与 `--dns-strip-aaaa` 一致（让流量保持在代理能够实际拦截的协议族/协议上）。
 
 ### 客户端设置
 

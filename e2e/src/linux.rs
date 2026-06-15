@@ -267,6 +267,57 @@ async fn test_port_selective_redirect(root: &Path, ports: &TestServerPorts) -> R
     Ok(())
 }
 
+async fn test_quic_blocked(root: &Path, ports: &TestServerPorts) -> Result<()> {
+    eprintln!("\n--- Test 5: QUIC / HTTP-3 (UDP) is dropped, not bypassed ---");
+
+    // The transparent proxy is TCP-only, so QUIC on UDP 443 must be dropped to
+    // prevent it from bypassing the proxy. e2e runs as root, so 127.0.0.1:443
+    // is bindable; a control server on an ephemeral port proves the drop is
+    // targeted (only QUIC ports), not a blanket UDP block.
+    let quic_server = UdpSocket::bind("127.0.0.1:443")
+        .await
+        .context("bind UDP 127.0.0.1:443 (e2e must run as root)")?;
+    let control_server = UdpSocket::bind("127.0.0.1:0").await?;
+    let control_port = control_server.local_addr()?.port();
+
+    let proxy_port = 18447u16;
+    let upstream = format!("socks5://127.0.0.1:{}", ports.socks5_port);
+
+    // Proxy TCP 443 → quic_block_ports mirrors it, dropping UDP 443.
+    let _nft = setup_nftables(
+        root,
+        proxy_port,
+        &format!("127.0.0.1:{}", ports.socks5_port),
+        "443",
+    )?;
+
+    sleep(Duration::from_millis(100)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    let mut buf = vec![0u8; 64];
+
+    // Control: UDP to a non-QUIC port must still be delivered.
+    client
+        .send_to(b"ping", format!("127.0.0.1:{control_port}"))
+        .await?;
+    timeout(Duration::from_secs(1), control_server.recv_from(&mut buf))
+        .await
+        .context("control UDP packet should be delivered, but timed out")?
+        .context("control recv_from failed")?;
+    eprintln!("  control UDP delivered (drop is targeted, not blanket)");
+
+    // QUIC: UDP to 443 must be dropped — it must never reach the server.
+    client.send_to(b"quic", "127.0.0.1:443").await?;
+    let leaked = timeout(Duration::from_millis(500), quic_server.recv_from(&mut buf)).await;
+    if leaked.is_ok() {
+        bail!("UDP 443 reached the server: QUIC/HTTP-3 bypassed the proxy");
+    }
+    eprintln!("  UDP 443 dropped");
+
+    eprintln!("  PASS");
+    Ok(())
+}
+
 pub async fn run(root: &Path, ports: &TestServerPorts) -> Result<()> {
     report_results(vec![
         ("SOCKS5 tunneling", test_socks5_tunneling(root, ports).await),
@@ -279,5 +330,6 @@ pub async fn run(root: &Path, ports: &TestServerPorts) -> Result<()> {
             "Port-selective redirect",
             test_port_selective_redirect(root, ports).await,
         ),
+        ("QUIC blocked", test_quic_blocked(root, ports).await),
     ])
 }

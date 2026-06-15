@@ -28,6 +28,9 @@ pub struct FirewallConfig {
     pub ports: Option<Vec<u16>>,
     /// Resolved DNS forwarder listen address. `None` disables DNS interception.
     pub dns_listen: Option<SocketAddr>,
+    /// Drop forwarded QUIC / HTTP-3 (UDP) so it can't bypass the TCP-only
+    /// proxy. Disabled by `--allow-quic`.
+    pub block_quic: bool,
 }
 
 impl FirewallConfig {
@@ -55,6 +58,28 @@ impl FirewallConfig {
             upstream_addr,
             ports,
             dns_listen: config.resolve_dns_listen(),
+            block_quic: !config.allow_quic,
+        }
+    }
+
+    /// UDP destination ports to drop so QUIC / HTTP-3 cannot bypass the
+    /// TCP-only proxy.
+    ///
+    /// - Empty when QUIC blocking is disabled (`--allow-quic`).
+    /// - When a `--ports` filter is set, mirrors those ports (the UDP twin of
+    ///   each redirected TCP port), so traffic can't slip past over QUIC on a
+    ///   port we proxy. Port 53 is excluded — it is handled by the DNS
+    ///   forwarder, never QUIC.
+    /// - Otherwise (all-TCP mode) blocks UDP 443, the established HTTP/3 port.
+    ///   Blocking every UDP port would break unrelated UDP apps (VPNs, VoIP,
+    ///   games) that were never meant to be proxied.
+    pub(crate) fn quic_block_ports(&self) -> Vec<u16> {
+        if !self.block_quic {
+            return Vec::new();
+        }
+        match &self.ports {
+            Some(ports) => ports.iter().copied().filter(|&p| p != 53).collect(),
+            None => vec![443],
         }
     }
 
@@ -228,6 +253,7 @@ mod tests {
             upstream_addr: None,
             ports: None,
             dns_listen: listen.map(|s| s.parse().unwrap()),
+            block_quic: true,
         }
     }
 
@@ -322,5 +348,67 @@ mod tests {
         ]);
         let fw = FirewallConfig::from_config(&config);
         assert_eq!(fw.ports, Some(vec![80, 443]));
+    }
+
+    fn fw_for_quic(block_quic: bool, ports: Option<Vec<u16>>) -> FirewallConfig {
+        FirewallConfig {
+            interface: "eth0".to_string(),
+            proxy_port: 8443,
+            fwmark: None,
+            upstream_addr: None,
+            ports,
+            dns_listen: None,
+            block_quic,
+        }
+    }
+
+    #[test]
+    fn test_quic_block_ports_all_tcp_mode_blocks_443() {
+        assert_eq!(fw_for_quic(true, None).quic_block_ports(), vec![443]);
+    }
+
+    #[test]
+    fn test_quic_block_ports_mirrors_port_filter() {
+        assert_eq!(
+            fw_for_quic(true, Some(vec![80, 443, 8443])).quic_block_ports(),
+            vec![80, 443, 8443]
+        );
+    }
+
+    #[test]
+    fn test_quic_block_ports_excludes_dns_port() {
+        // 53 is handled by the DNS forwarder; dropping UDP 53 here would
+        // blackhole DNS.
+        assert_eq!(
+            fw_for_quic(true, Some(vec![53, 443])).quic_block_ports(),
+            vec![443]
+        );
+    }
+
+    #[test]
+    fn test_quic_block_ports_empty_when_disabled() {
+        assert!(fw_for_quic(false, None).quic_block_ports().is_empty());
+        assert!(fw_for_quic(false, Some(vec![443]))
+            .quic_block_ports()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_allow_quic_flag_disables_block() {
+        use clap::Parser;
+        let blocked = FirewallConfig::from_config(&Config::parse_from([
+            "trans_proxy",
+            "--upstream-proxy",
+            "127.0.0.1:1082",
+        ]));
+        assert!(blocked.block_quic);
+
+        let allowed = FirewallConfig::from_config(&Config::parse_from([
+            "trans_proxy",
+            "--upstream-proxy",
+            "127.0.0.1:1082",
+            "--allow-quic",
+        ]));
+        assert!(!allowed.block_quic);
     }
 }
