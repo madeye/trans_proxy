@@ -292,6 +292,9 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
         }
     }
 
+    // Drop forwarded QUIC / HTTP-3 so it can't bypass the TCP-only proxy.
+    setup_quic_block(config, NftFamily::Ip)?;
+
     // --- IPv6 (best-effort) ---
     if let Err(e) = setup_ipv6(config, &addrs) {
         println!("Warning: IPv6 NAT redirect setup failed ({e:#}), skipping.");
@@ -568,7 +571,121 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
         }
     }
 
+    // Drop forwarded QUIC / HTTP-3 (IPv6) so it can't bypass the proxy.
+    setup_quic_block(config, NftFamily::Ip6)?;
+
     Ok(())
+}
+
+impl NftFamily {
+    fn table(self) -> &'static str {
+        match self {
+            NftFamily::Ip => "ip",
+            NftFamily::Ip6 => "ip6",
+        }
+    }
+}
+
+/// Drop QUIC / HTTP-3 (UDP) destined for the proxied ports so it cannot bypass
+/// the TCP-only transparent proxy.
+///
+/// QUIC is dropped (not redirected): the proxy speaks only TCP, so the goal is
+/// to make UDP 443 unreachable, which causes browsers to fall back to TCP
+/// (HTTP/1.1 / HTTP/2) — the path that is actually proxied.
+///
+/// - `forward` hook drops QUIC arriving from LAN clients (the gateway case).
+/// - `output` hook drops QUIC originated by the gateway itself, but only when
+///   `--local-traffic` is enabled (signalled by `fwmark`), mirroring the
+///   existing TCP redirect scope.
+///
+/// Uses dedicated `filter` chains so a `drop` verdict is reliable; a `drop` in
+/// the `nat` chains would only see the first packet of a flow.
+fn setup_quic_block(config: &FirewallConfig, family: NftFamily) -> Result<()> {
+    let ports = config.quic_block_ports();
+    if ports.is_empty() {
+        return Ok(());
+    }
+    let table = family.table();
+    let iface = &config.interface;
+
+    let port_list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+    println!(
+        "Dropping forwarded QUIC/HTTP-3 (UDP {}) so it can't bypass the proxy...",
+        port_list.join(",")
+    );
+
+    run_cmd(
+        "nft",
+        &[
+            "add",
+            "chain",
+            table,
+            "trans_proxy",
+            "quic_forward",
+            "{ type filter hook forward priority 0 ; }",
+        ],
+    )?;
+    for port in &ports {
+        run_nft_args(&quic_drop_rule_args(
+            family,
+            "quic_forward",
+            "iifname",
+            iface,
+            *port,
+        ))?;
+    }
+
+    // Gateway-originated QUIC: only intercepted alongside other local traffic.
+    if config.fwmark.is_some() {
+        run_cmd(
+            "nft",
+            &[
+                "add",
+                "chain",
+                table,
+                "trans_proxy",
+                "quic_output",
+                "{ type filter hook output priority 0 ; }",
+            ],
+        )?;
+        for port in &ports {
+            run_nft_args(&quic_drop_rule_args(
+                family,
+                "quic_output",
+                "oifname",
+                iface,
+                *port,
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Build the `nft add rule` args for a single QUIC drop rule.
+///
+/// `dir` is the interface-match keyword: `iifname` (forward hook, LAN ingress)
+/// or `oifname` (output hook, gateway egress).
+fn quic_drop_rule_args(
+    family: NftFamily,
+    chain: &str,
+    dir: &str,
+    iface: &str,
+    port: u16,
+) -> Vec<String> {
+    vec![
+        "add".to_string(),
+        "rule".to_string(),
+        family.table().to_string(),
+        "trans_proxy".to_string(),
+        chain.to_string(),
+        dir.to_string(),
+        iface.to_string(),
+        "udp".to_string(),
+        "dport".to_string(),
+        port.to_string(),
+        "drop".to_string(),
+    ]
 }
 
 fn upstream_output_exclusion_args(family: NftFamily, upstream: SocketAddr) -> Option<Vec<String>> {
@@ -616,7 +733,49 @@ pub fn teardown() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{upstream_output_exclusion_args, NftFamily};
+    use super::{quic_drop_rule_args, upstream_output_exclusion_args, NftFamily};
+
+    #[test]
+    fn builds_ipv4_quic_forward_drop_rule() {
+        let args = quic_drop_rule_args(NftFamily::Ip, "quic_forward", "iifname", "eth0", 443);
+        assert_eq!(
+            args,
+            [
+                "add",
+                "rule",
+                "ip",
+                "trans_proxy",
+                "quic_forward",
+                "iifname",
+                "eth0",
+                "udp",
+                "dport",
+                "443",
+                "drop"
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_ipv6_quic_output_drop_rule() {
+        let args = quic_drop_rule_args(NftFamily::Ip6, "quic_output", "oifname", "eth0", 8443);
+        assert_eq!(
+            args,
+            [
+                "add",
+                "rule",
+                "ip6",
+                "trans_proxy",
+                "quic_output",
+                "oifname",
+                "eth0",
+                "udp",
+                "dport",
+                "8443",
+                "drop"
+            ]
+        );
+    }
 
     #[test]
     fn builds_ipv4_upstream_exclusion_for_ipv4_table() {

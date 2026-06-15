@@ -125,6 +125,25 @@ fn build_rules(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> String
         ));
     }
 
+    // Drop QUIC / HTTP-3 (UDP) on the proxied ports so it can't bypass the
+    // TCP-only proxy: making UDP 443 unreachable makes browsers fall back to
+    // TCP (HTTP/1.1 / HTTP/2), the path that is actually proxied. `quick`
+    // stops rule evaluation so the drop is not overridden by a later `pass`.
+    // As a filter rule it must appear after the rdr/nat rules below in the
+    // emitted ruleset, so it is threaded into the filter section of each branch.
+    let quic_block = {
+        let ports = config.quic_block_ports();
+        if ports.is_empty() {
+            String::new()
+        } else {
+            let port_list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+            format!(
+                "block drop quick on {iface} proto udp from any to any port {{{}}}\n",
+                port_list.join(", ")
+            )
+        }
+    };
+
     // Build the anchor rules
     if let Some(upstream) = config.upstream_addr {
         let up_ip = upstream.ip();
@@ -149,6 +168,7 @@ fn build_rules(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> String
              rdr on lo0 inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
              rdr on {iface} inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
              rdr on lo0 inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
+             {quic_block}\
              pass out quick on {iface} proto tcp from any to {up_ip} port {up_port}\n\
              pass out on {iface} inet route-to (lo0 127.0.0.1) proto tcp from any to any{port_filter}\n\
              pass out on {iface} inet6 route-to (lo0 ::1) proto tcp from any to any{port_filter}"
@@ -157,7 +177,8 @@ fn build_rules(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> String
         format!(
             "{dns_rdr}{local_no_rdr}\
              rdr on {iface} inet proto tcp from any to any{port_filter} -> 127.0.0.1 port {port}\n\
-             rdr on {iface} inet6 proto tcp from any to any{port_filter} -> ::1 port {port}"
+             rdr on {iface} inet6 proto tcp from any to any{port_filter} -> ::1 port {port}\n\
+             {quic_block}"
         )
     }
 }
@@ -305,6 +326,7 @@ mod tests {
             upstream_addr: None,
             ports,
             dns_listen,
+            block_quic: true,
         }
     }
 
@@ -363,6 +385,50 @@ mod tests {
         );
         assert!(rules
             .contains("no rdr on en0 inet6 proto tcp from any to 2001:db8:1:2::1 port {80, 443}"));
+    }
+
+    #[test]
+    fn test_quic_block_drops_udp_443_after_rdr_rules() {
+        let rules = build_rules(&config(None, None), &addrs());
+
+        let block = rules
+            .find("block drop quick on en0 proto udp from any to any port {443}")
+            .expect("QUIC block rule present in all-TCP mode");
+        // pf requires translation (rdr) rules before filter (block/pass) rules.
+        let last_rdr = rules.rfind("rdr on").unwrap();
+        assert!(last_rdr < block, "block filter rule must follow rdr rules");
+    }
+
+    #[test]
+    fn test_quic_block_precedes_pass_rules_with_upstream() {
+        // With an upstream proxy the anchor also emits `pass out` filter rules;
+        // the QUIC `block drop quick` must come before them so it isn't
+        // shadowed, and after the rdr rules so pf accepts the ordering.
+        let mut cfg = config(None, None);
+        cfg.upstream_addr = Some("127.0.0.1:1080".parse().unwrap());
+        let rules = build_rules(&cfg, &addrs());
+
+        let last_rdr = rules.rfind("rdr on").unwrap();
+        let block = rules.find("block drop quick on en0 proto udp").unwrap();
+        let pass = rules.find("pass out").unwrap();
+        assert!(last_rdr < block, "block must follow rdr rules");
+        assert!(block < pass, "block must precede pass rules");
+    }
+
+    #[test]
+    fn test_quic_block_mirrors_port_filter() {
+        let rules = build_rules(&config(Some(vec![443, 8443]), None), &addrs());
+        assert!(
+            rules.contains("block drop quick on en0 proto udp from any to any port {443, 8443}")
+        );
+    }
+
+    #[test]
+    fn test_quic_block_absent_when_disabled() {
+        let mut cfg = config(None, None);
+        cfg.block_quic = false;
+        let rules = build_rules(&cfg, &addrs());
+        assert!(!rules.contains("block drop"));
     }
 
     #[test]

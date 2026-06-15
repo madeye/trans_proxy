@@ -197,6 +197,7 @@ sudo ./target/release/trans_proxy \
 | `--local-traffic` | off | Also intercept traffic originating from the gateway itself (not just forwarded LAN traffic) |
 | `--fwmark` | `1` | Firewall mark for loop prevention on Linux (used with `--local-traffic`) |
 | `--ports` | *(all TCP)* | Comma-separated list of TCP ports to redirect (e.g., `22,80,443`). When omitted, all TCP traffic is redirected |
+| `--allow-quic` | off | Allow QUIC / HTTP-3 (UDP) through unproxied. By default the firewall drops forwarded QUIC (UDP 443, or the UDP twin of each `--ports` entry) so it can't bypass the TCP-only proxy — see [QUIC / HTTP-3 handling](#quic--http-3-handling) |
 | `--install` | off | Install as a system service (launchd on macOS, systemd on Linux) |
 | `--uninstall` | off | Uninstall the system service |
 
@@ -296,6 +297,32 @@ Loop prevention is automatic — no dedicated system user required:
 
 - **Linux**: Sets `SO_MARK` (fwmark) on outbound sockets; nftables OUTPUT chain skips marked packets
 - **macOS**: Sets `IP_BOUND_IF` to bind outbound sockets to `lo0` when the upstream is on localhost, plus a `pass out quick` pf rule to exclude the upstream proxy destination
+
+### QUIC / HTTP-3 handling
+
+trans_proxy relays **TCP only** — both the SOCKS5 (`CONNECT`) and HTTP `CONNECT`
+tunnels carry TCP, and the firewall redirects only TCP. QUIC / HTTP-3 runs over
+**UDP** (typically port 443), which a transparent TCP proxy cannot tunnel
+(HTTP `CONNECT` has no UDP mode, and there is no SOCKS5 `UDP ASSOCIATE` datagram
+path). Left untouched, forwarded QUIC would be routed straight to the
+destination, **bypassing the upstream proxy entirely** — and because browsers
+(Chrome, Edge, Firefox) prefer HTTP/3, much of what looks like "HTTPS" would
+silently escape, leaking the client IP and destination.
+
+To prevent this, the firewall **drops forwarded QUIC** so clients transparently
+fall back to TCP (HTTP/1.1 / HTTP/2), which *is* proxied:
+
+- All-TCP mode (no `--ports`): drops UDP **443**, the established HTTP/3 port.
+- With `--ports`: drops the **UDP twin** of each redirected TCP port (port 53 is
+  excluded — it is served by the DNS forwarder).
+- On Linux this is a `filter` chain on the `forward` hook (and `output` when
+  `--local-traffic` is set); on macOS a `block drop quick … proto udp` pf rule.
+
+Unrelated UDP (VPNs, VoIP, NTP, games) is left alone. Pass `--allow-quic` to
+disable the drop entirely — only do this if QUIC is handled elsewhere or you
+explicitly want it to bypass the proxy. This mirrors `--dns-strip-aaaa`, which
+exists for the same reason (keeping traffic on the family/protocol the proxy can
+actually intercept).
 
 ### Client Setup
 

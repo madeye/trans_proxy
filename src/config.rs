@@ -331,6 +331,18 @@ pub struct Config {
     #[arg(long)]
     pub ports: Option<PortList>,
 
+    /// Allow QUIC / HTTP-3 (UDP) to pass through the gateway unproxied.
+    ///
+    /// The transparent proxy only relays TCP, so QUIC (UDP, typically port
+    /// 443) would otherwise be forwarded straight to its destination,
+    /// bypassing the upstream proxy entirely — browsers prefer HTTP/3 and
+    /// would silently escape, leaking the client IP and destination. By
+    /// default the firewall drops forwarded QUIC so clients fall back to TCP
+    /// (HTTP/1.1 / HTTP/2), which is proxied. Pass this flag to disable that
+    /// drop (e.g. if QUIC is handled elsewhere or must be allowed through).
+    #[arg(long)]
+    pub allow_quic: bool,
+
     /// Install as a system service (launchd on macOS, systemd on Linux)
     #[arg(long)]
     pub install: bool,
