@@ -15,6 +15,32 @@ pub fn fwmark_from_env() -> Option<u32> {
     std::env::var("FWMARK").ok()?.parse().ok()
 }
 
+/// Set `SO_MARK` on any socket fd (Linux only; no-op elsewhere or when
+/// `fwmark` is `None`). Works for both TCP and UDP sockets — used by the
+/// SOCKS5 UDP relay's onward socket to avoid an nftables redirect loop.
+pub fn set_mark<S>(sock: &S, fwmark: Option<u32>) -> Result<()>
+where
+    S: std::os::unix::io::AsRawFd,
+{
+    let _ = (sock, fwmark); // used on linux only
+    #[cfg(target_os = "linux")]
+    if let Some(mark) = fwmark {
+        let ret = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                &mark as *const u32 as *const libc::c_void,
+                std::mem::size_of::<u32>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error()).context("failed to set SO_MARK");
+        }
+    }
+    Ok(())
+}
+
 /// Connect to `addr`, setting SO_MARK if `fwmark` is provided (Linux only).
 pub async fn connect_marked(addr: SocketAddr, fwmark: Option<u32>) -> Result<TcpStream> {
     let _ = &fwmark; // used on linux only

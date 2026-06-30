@@ -1,0 +1,90 @@
+# Multi-container gateway e2e for trans_proxy.
+#
+# Topology (real forwarded traffic, the path the loopback e2e cannot reach):
+#
+#   client ──lan──> gateway ──wan──> server
+#   10.10.0.3       10.10.0.2         10.20.0.2
+#                   10.20.0.3
+#
+#   * client: routes WAN traffic through the gateway; runs the gw_client driver.
+#   * gateway: trans_proxy with a real PREROUTING redirect (TCP) + TPROXY (UDP).
+#   * server: upstream proxy (SOCKS5 :1080 / HTTP CONNECT :3128) + HTTP dest
+#     (:8080) + UDP echo (:443), all in one container on the WAN side.
+#
+# Driven by scripts/docker_gateway_e2e.sh, which runs it once per upstream.
+# All three services share the image built from the repo Dockerfile.
+
+services:
+  server:
+    image: trans_proxy_e2e:latest
+    environment:
+      PROXY_BIND_ADDR: 0.0.0.0
+      BIND_ADDR: 0.0.0.0
+      SOCKS5_PORT: "1080"
+      HTTP_CONNECT_PORT: "3128"
+      HTTP_DEST_PORT: "8080"
+      UDP_ECHO_PORT: "443"
+      RUST_LOG: warn
+    command: ["/app/target/release/test_servers"]
+    networks:
+      wan:
+        ipv4_address: 10.20.0.2
+
+  gateway:
+    image: trans_proxy_e2e:latest
+    privileged: true
+    depends_on:
+      - server
+    environment:
+      GATEWAY_UPSTREAM: ${GATEWAY_UPSTREAM:-socks5://10.20.0.2:1080}
+    command:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        LAN_IF=$$(ip -o -4 addr show | awk '/10\.10\.0\./ {print $$2; exit}')
+        echo "gateway: LAN interface=$$LAN_IF upstream=$$GATEWAY_UPSTREAM"
+        /app/target/release/trans_proxy --setup-firewall \
+          --interface "$$LAN_IF" --listen-addr 0.0.0.0:8443 \
+          --upstream-proxy "$$GATEWAY_UPSTREAM" --ports 8080,443
+        echo "gateway: firewall ready, starting proxy"
+        exec /app/target/release/trans_proxy --listen-addr 0.0.0.0:8443 \
+          --upstream-proxy "$$GATEWAY_UPSTREAM" --log-level debug
+    networks:
+      lan:
+        ipv4_address: 10.10.0.2
+      wan:
+        ipv4_address: 10.20.0.3
+
+  client:
+    image: trans_proxy_e2e:latest
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - gateway
+    environment:
+      TCP_TARGET: 10.20.0.2:8080
+      UDP_TARGET: 10.20.0.2:443
+      EXPECT_UDP: ${EXPECT_UDP:-1}
+      SCENARIO: ${SCENARIO:-socks5}
+    command:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        ip route replace 10.20.0.0/24 via 10.10.0.2
+        echo "client: routing 10.20.0.0/24 via gateway 10.10.0.2"
+        exec /app/target/release/gw_client
+    networks:
+      lan:
+        ipv4_address: 10.10.0.3
+
+networks:
+  lan:
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24
+  wan:
+    ipam:
+      config:
+        - subnet: 10.20.0.0/24

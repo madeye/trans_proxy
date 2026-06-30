@@ -2,7 +2,7 @@
 //!
 //! Accepts TCP connections, reads HTTP request headers, responds with a known body.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -13,8 +13,10 @@ pub struct HttpDestServer {
 }
 
 impl HttpDestServer {
-    pub async fn bind(addr: &str) -> Result<Self> {
-        let listener = TcpListener::bind(format!("{addr}:0")).await?;
+    pub async fn bind(addr: &str, port: u16) -> Result<Self> {
+        let listener = TcpListener::bind(format!("{addr}:{port}"))
+            .await
+            .with_context(|| format!("failed to bind HTTP dest on {addr}:{port}"))?;
         Ok(Self { listener })
     }
 

@@ -64,6 +64,19 @@ jobs:
       - name: Run E2E tests
         run: sudo ./target/release/e2e
 
+  e2e-gateway-docker:
+    name: E2E Gateway (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Multi-container topology: a client routes through a trans_proxy gateway
+      # (real PREROUTING redirect for TCP + TPROXY for UDP) to a WAN server.
+      # Covers the forwarded-traffic path — including the SOCKS5 UDP ASSOCIATE
+      # QUIC relay — that the loopback e2e structurally cannot reach.
+      - name: Run docker gateway e2e
+        run: ./scripts/docker_gateway_e2e.sh
+
   e2e-macos:
     name: E2E Tests (macOS)
     runs-on: macos-latest

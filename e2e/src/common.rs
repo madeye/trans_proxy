@@ -22,6 +22,8 @@ pub struct TestServerPorts {
     pub http_connect_port: u16,
     pub http_dest_port: u16,
     pub http_dest_addr: String,
+    #[allow(dead_code)] // consumed only by the docker gateway e2e
+    pub udp_echo_port: u16,
 }
 
 /// Guard that kills a child process on drop.

@@ -28,11 +28,21 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 
 # E2E tests (require root + nftables on Linux / pf on macOS)
+# Loopback-based: proxy + test servers on one host via the firewall's
+# OUTPUT/redirect path with --local-traffic.
 sudo ./target/release/e2e
 
-# Docker build + test (Linux)
+# Docker build + loopback e2e (Linux, as root in a container)
 docker build -t trans_proxy_test .
 docker run --rm --privileged trans_proxy_test /app/target/release/e2e
+
+# Docker gateway e2e (Linux): multi-container topology that exercises the REAL
+# forwarded-traffic path the loopback e2e cannot — a client routes through a
+# trans_proxy "gateway" container (PREROUTING redirect for TCP, TPROXY for UDP)
+# to a WAN server. Covers TCP via SOCKS5/HTTP-CONNECT and the SOCKS5 UDP
+# ASSOCIATE QUIC relay. Runs two scenarios (SOCKS5 relays UDP; HTTP CONNECT
+# drops it). See docker/gateway-e2e.yml.
+./scripts/docker_gateway_e2e.sh
 ```
 
 ## Deploy to remote Linux host
@@ -49,7 +59,8 @@ ssh user@host "sudo systemctl stop trans_proxy && sudo cp /tmp/trans_proxy /usr/
 - `src/firewall/` — Native firewall setup/teardown (nftables on Linux, pf on macOS)
 - `src/dns.rs` — DNS forwarder (UDP/DoH upstream) with IP→domain mapping
 - `src/proxy.rs` — TCP accept loop and per-connection handler
-- `src/tunnel.rs` — HTTP CONNECT / SOCKS5 handshakes
+- `src/tunnel.rs` — HTTP CONNECT / SOCKS5 handshakes (incl. SOCKS5 UDP ASSOCIATE)
+- `src/udp.rs` — Transparent UDP relay (Linux TPROXY) for QUIC/HTTP-3 via SOCKS5
 - `src/sni.rs` — TLS ClientHello SNI extraction
 - `src/orig_dest/` — Original destination recovery (SO_ORIGINAL_DST / DIOCNATLOOK)
 - `src/service/` — System service installation (systemd / launchd)
