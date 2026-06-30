@@ -327,6 +327,7 @@ mod tests {
             ports,
             dns_listen,
             block_quic: true,
+            proxy_udp: false,
         }
     }
 

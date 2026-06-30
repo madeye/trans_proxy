@@ -31,6 +31,14 @@ pub struct FirewallConfig {
     /// Drop forwarded QUIC / HTTP-3 (UDP) so it can't bypass the TCP-only
     /// proxy. Disabled by `--allow-quic`.
     pub block_quic: bool,
+    /// Transparently intercept forwarded QUIC / HTTP-3 (UDP) and relay it
+    /// through the SOCKS5 upstream via UDP ASSOCIATE instead of dropping it.
+    /// Enabled when the upstream is SOCKS5 and `--allow-quic` was not passed
+    /// (Linux only). When set, forwarded QUIC is TPROXY-redirected to the proxy
+    /// rather than dropped; gateway-originated QUIC (under `--local-traffic`)
+    /// is still dropped so the gateway's own clients fall back to TCP.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub proxy_udp: bool,
 }
 
 impl FirewallConfig {
@@ -59,6 +67,7 @@ impl FirewallConfig {
             ports,
             dns_listen: config.resolve_dns_listen(),
             block_quic: !config.allow_quic,
+            proxy_udp: config.proxy_udp_enabled(),
         }
     }
 
@@ -254,6 +263,7 @@ mod tests {
             ports: None,
             dns_listen: listen.map(|s| s.parse().unwrap()),
             block_quic: true,
+            proxy_udp: false,
         }
     }
 
@@ -359,6 +369,7 @@ mod tests {
             ports,
             dns_listen: None,
             block_quic,
+            proxy_udp: false,
         }
     }
 

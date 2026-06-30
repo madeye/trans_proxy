@@ -33,7 +33,7 @@
 //!   `route-to` rule would intercept it.
 
 use anyhow::{bail, Context, Result};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -69,7 +69,36 @@ pub async fn connect_via_proxy(
     #[cfg(target_os = "linux")] fwmark: Option<u32>,
     #[cfg(target_os = "macos")] local_traffic: bool,
 ) -> Result<(TcpStream, Vec<u8>)> {
-    let mut stream = timeout(CONNECT_TIMEOUT, async {
+    let mut stream = connect_proxy_stream(
+        proxy,
+        #[cfg(target_os = "linux")]
+        fwmark,
+        #[cfg(target_os = "macos")]
+        local_traffic,
+    )
+    .await?;
+
+    let leftover = match &proxy.protocol {
+        ProxyProtocol::HttpConnect => handshake_http_connect(&mut stream, dest, hostname).await?,
+        ProxyProtocol::Socks5(auth) => {
+            // SOCKS5 framing is consumed with exact-size reads — no leftover
+            socks5_negotiate_auth(&mut stream, auth).await?;
+            socks5_connect(&mut stream, dest, hostname).await?;
+            Vec::new()
+        }
+    };
+
+    Ok((stream, leftover))
+}
+
+/// Open a TCP connection to the upstream proxy with the platform-specific
+/// loop-prevention socket options applied (see module docs).
+async fn connect_proxy_stream(
+    proxy: &UpstreamProxy,
+    #[cfg(target_os = "linux")] fwmark: Option<u32>,
+    #[cfg(target_os = "macos")] local_traffic: bool,
+) -> Result<TcpStream> {
+    timeout(CONNECT_TIMEOUT, async {
         let socket = if proxy.addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
         } else {
@@ -90,18 +119,80 @@ pub async fn connect_via_proxy(
     })
     .await
     .context("Timeout connecting to upstream proxy")?
-    .context("Failed to connect to upstream proxy")?;
+    .context("Failed to connect to upstream proxy")
+}
 
-    let leftover = match &proxy.protocol {
-        ProxyProtocol::HttpConnect => handshake_http_connect(&mut stream, dest, hostname).await?,
-        ProxyProtocol::Socks5(auth) => {
-            // SOCKS5 framing is consumed with exact-size reads — no leftover
-            handshake_socks5(&mut stream, dest, hostname, auth).await?;
-            Vec::new()
+/// Establish a SOCKS5 UDP ASSOCIATE relay through the upstream proxy.
+///
+/// Returns the TCP control stream — which **must be kept alive** for the
+/// lifetime of the association (closing it tells the proxy to tear down the
+/// UDP relay, per [RFC 1928](https://tools.ietf.org/html/rfc1928)) — and the
+/// relay endpoint to which encapsulated UDP datagrams are sent.
+///
+/// The ASSOCIATE request advertises the wildcard source `0.0.0.0:0`: we cannot
+/// predict the address the proxy will observe our datagrams arriving from, so
+/// the proxy must accept datagrams from any source. If the proxy replies with
+/// an unspecified bind address, datagrams are sent to the proxy's own IP (the
+/// usual "same host as the control connection" convention).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // consumer (udp.rs) is Linux-only
+pub async fn udp_associate(
+    proxy: &UpstreamProxy,
+    #[cfg(target_os = "linux")] fwmark: Option<u32>,
+    #[cfg(target_os = "macos")] local_traffic: bool,
+) -> Result<(TcpStream, SocketAddr)> {
+    let auth = match &proxy.protocol {
+        ProxyProtocol::Socks5(auth) => auth,
+        ProxyProtocol::HttpConnect => {
+            bail!("UDP ASSOCIATE requires a SOCKS5 upstream proxy");
         }
     };
 
-    Ok((stream, leftover))
+    let mut stream = connect_proxy_stream(
+        proxy,
+        #[cfg(target_os = "linux")]
+        fwmark,
+        #[cfg(target_os = "macos")]
+        local_traffic,
+    )
+    .await?;
+
+    socks5_negotiate_auth(&mut stream, auth).await?;
+
+    // UDP ASSOCIATE request (CMD 0x03), wildcard IPv4 source 0.0.0.0:0.
+    let req = [0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+    timeout(CONNECT_TIMEOUT, stream.write_all(&req))
+        .await
+        .context("Timeout sending SOCKS5 UDP ASSOCIATE request")?
+        .context("Failed to send SOCKS5 UDP ASSOCIATE request")?;
+
+    let mut resp_header = [0u8; 4];
+    timeout(CONNECT_TIMEOUT, stream.read_exact(&mut resp_header))
+        .await
+        .context("Timeout reading SOCKS5 ASSOCIATE response")?
+        .context("Failed to read SOCKS5 ASSOCIATE response")?;
+
+    if resp_header[0] != 0x05 {
+        bail!(
+            "SOCKS5: unexpected version {} in ASSOCIATE response",
+            resp_header[0]
+        );
+    }
+    if resp_header[1] != 0x00 {
+        bail!(
+            "SOCKS5: UDP ASSOCIATE failed with status 0x{:02x} ({})",
+            resp_header[1],
+            socks5_error_message(resp_header[1])
+        );
+    }
+
+    let bnd = read_socks5_bound_addr(&mut stream, resp_header[3]).await?;
+    let relay = if bnd.ip().is_unspecified() {
+        SocketAddr::new(proxy.addr.ip(), bnd.port())
+    } else {
+        bnd
+    };
+
+    Ok((stream, relay))
 }
 
 /// Perform an HTTP CONNECT handshake on an established TCP stream.
@@ -154,20 +245,12 @@ async fn handshake_http_connect(
     response
 }
 
-/// Perform a SOCKS5 handshake ([RFC 1928](https://tools.ietf.org/html/rfc1928) /
-/// [RFC 1929](https://tools.ietf.org/html/rfc1929)) on an established TCP stream.
-///
-/// Steps:
-/// 1. **Greeting** — advertise supported auth methods
-/// 2. **Auth** — username/password sub-negotiation if the server selects method `0x02`
-/// 3. **CONNECT** — request a tunnel to `dest` (using ATYP domain when `hostname` is available)
-async fn handshake_socks5(
-    stream: &mut TcpStream,
-    dest: SocketAddr,
-    hostname: Option<&str>,
-    auth: &ProxyAuth,
-) -> Result<()> {
-    // Step 1: Greeting — advertise supported auth methods
+/// Perform the SOCKS5 greeting + authentication sub-negotiation
+/// ([RFC 1928](https://tools.ietf.org/html/rfc1928) /
+/// [RFC 1929](https://tools.ietf.org/html/rfc1929)) on an established stream,
+/// leaving it ready for a CONNECT or UDP ASSOCIATE request.
+async fn socks5_negotiate_auth(stream: &mut TcpStream, auth: &ProxyAuth) -> Result<()> {
+    // Greeting — advertise supported auth methods
     let greeting = match auth {
         ProxyAuth::None => vec![0x05, 0x01, 0x00], // 1 method: no auth
         ProxyAuth::UsernamePassword { .. } => vec![0x05, 0x02, 0x00, 0x02], // 2 methods: no auth + user/pass
@@ -209,7 +292,16 @@ async fn handshake_socks5(
         other => bail!("SOCKS5: unsupported auth method 0x{:02x}", other),
     }
 
-    // Step 2: CONNECT request
+    Ok(())
+}
+
+/// Send a SOCKS5 CONNECT request for `dest` and consume the reply, leaving the
+/// stream clean for relay. Assumes auth negotiation has already completed.
+async fn socks5_connect(
+    stream: &mut TcpStream,
+    dest: SocketAddr,
+    hostname: Option<&str>,
+) -> Result<()> {
     let req = socks5_connect_request(dest, hostname);
 
     timeout(CONNECT_TIMEOUT, stream.write_all(&req))
@@ -239,7 +331,16 @@ async fn handshake_socks5(
     }
 
     // Consume the bound address (ATYP + addr + port) so the stream is clean
-    match resp_header[3] {
+    read_socks5_bound_addr(stream, resp_header[3]).await?;
+
+    Ok(())
+}
+
+/// Read and return a SOCKS5 bound address (`ATYP` + address + port) following a
+/// reply header. A domain `ATYP` is consumed but reported as an unspecified
+/// address (the caller substitutes a known IP).
+async fn read_socks5_bound_addr(stream: &mut TcpStream, atyp: u8) -> Result<SocketAddr> {
+    match atyp {
         0x01 => {
             // IPv4: 4 bytes addr + 2 bytes port
             let mut buf = [0u8; 6];
@@ -247,6 +348,9 @@ async fn handshake_socks5(
                 .await
                 .context("Timeout reading SOCKS5 bound address")?
                 .context("Failed to read SOCKS5 bound address")?;
+            let ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+            let port = u16::from_be_bytes([buf[4], buf[5]]);
+            Ok(SocketAddr::from((ip, port)))
         }
         0x03 => {
             // Domain: 1 byte len + domain + 2 bytes port
@@ -260,6 +364,8 @@ async fn handshake_socks5(
                 .await
                 .context("Timeout reading SOCKS5 bound domain")?
                 .context("Failed to read SOCKS5 bound domain")?;
+            let port = u16::from_be_bytes([buf[buf.len() - 2], buf[buf.len() - 1]]);
+            Ok(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
         }
         0x04 => {
             // IPv6: 16 bytes addr + 2 bytes port
@@ -268,11 +374,14 @@ async fn handshake_socks5(
                 .await
                 .context("Timeout reading SOCKS5 bound IPv6 address")?
                 .context("Failed to read SOCKS5 bound IPv6 address")?;
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&buf[..16]);
+            let ip = Ipv6Addr::from(octets);
+            let port = u16::from_be_bytes([buf[16], buf[17]]);
+            Ok(SocketAddr::from((ip, port)))
         }
         other => bail!("SOCKS5: unknown address type 0x{:02x} in response", other),
     }
-
-    Ok(())
 }
 
 fn http_connect_request(dest: SocketAddr, hostname: Option<&str>) -> String {
@@ -312,6 +421,61 @@ fn socks5_connect_request(dest: SocketAddr, hostname: Option<&str>) -> Vec<u8> {
     }
     req.extend_from_slice(&dest.port().to_be_bytes());
     req
+}
+
+/// Encapsulate a UDP payload in a SOCKS5 UDP request header
+/// ([RFC 1928 §7](https://tools.ietf.org/html/rfc1928#section-7)):
+/// `RSV(2) | FRAG(1)=0 | ATYP | DST.ADDR | DST.PORT | DATA`.
+///
+/// Uses the domain `ATYP` when a safe `hostname` is supplied (letting the proxy
+/// resolve and apply domain policy), otherwise the raw destination IP.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // consumer (udp.rs) is Linux-only
+pub fn encode_socks5_udp(dest: SocketAddr, hostname: Option<&str>, payload: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(payload.len() + 22);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00]); // RSV(2) + FRAG(1)=0
+
+    match usable_proxy_hostname(hostname) {
+        Some(h) => {
+            pkt.push(0x03);
+            pkt.push(h.len() as u8);
+            pkt.extend_from_slice(h.as_bytes());
+        }
+        None => match dest.ip() {
+            IpAddr::V4(ip) => {
+                pkt.push(0x01);
+                pkt.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                pkt.push(0x04);
+                pkt.extend_from_slice(&ip.octets());
+            }
+        },
+    }
+    pkt.extend_from_slice(&dest.port().to_be_bytes());
+    pkt.extend_from_slice(payload);
+    pkt
+}
+
+/// Parse a SOCKS5 UDP reply header, returning the byte offset at which the
+/// encapsulated payload begins.
+///
+/// Returns `None` if the datagram is too short, malformed, or fragmented
+/// (`FRAG != 0` — reassembly is unsupported, as in most SOCKS5 implementations).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // consumer (udp.rs) is Linux-only
+pub fn socks5_udp_payload_offset(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 4 || buf[2] != 0x00 {
+        return None;
+    }
+    let off = match buf[3] {
+        0x01 => 4 + 4 + 2,                           // IPv4
+        0x04 => 4 + 16 + 2,                          // IPv6
+        0x03 => 4 + 1 + (*buf.get(4)? as usize) + 2, // domain
+        _ => return None,
+    };
+    if buf.len() < off {
+        return None;
+    }
+    Some(off)
 }
 
 fn proxy_request_host(dest: SocketAddr, hostname: Option<&str>) -> String {
@@ -685,6 +849,187 @@ mod tests {
         assert!(!request.contains("Injected: yes"));
     }
 
+    #[test]
+    fn test_encode_socks5_udp_ipv4() {
+        let dest: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let pkt = encode_socks5_udp(dest, None, b"hi");
+        assert_eq!(
+            pkt,
+            vec![
+                0x00, 0x00, 0x00, // RSV + FRAG
+                0x01, // ATYP IPv4
+                93, 184, 216, 34, // addr
+                0x01, 0xbb, // port 443
+                b'h', b'i', // payload
+            ]
+        );
+    }
+
+    #[test]
+    fn test_encode_socks5_udp_uses_hostname() {
+        let dest: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let pkt = encode_socks5_udp(dest, Some("example.com"), b"x");
+        assert_eq!(
+            pkt,
+            vec![
+                0x00, 0x00, 0x00, 0x03, 0x0b, // domain ATYP + len
+                b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm', 0x01, 0xbb, b'x',
+            ]
+        );
+    }
+
+    #[test]
+    fn test_encode_socks5_udp_falls_back_for_invalid_hostname() {
+        let dest: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let pkt = encode_socks5_udp(dest, Some("bad\r\nhost"), b"x");
+        // Injected hostname rejected → falls back to the IPv4 address type
+        assert_eq!(pkt[3], 0x01);
+        assert!(!pkt.windows(3).any(|w| w == b"bad"));
+    }
+
+    #[test]
+    fn test_socks5_udp_payload_offset() {
+        // IPv4 reply: 3 + 1 + 4 + 2 = 10
+        let v4 = [0u8, 0, 0, 1, 1, 2, 3, 4, 0, 80, b'p'];
+        assert_eq!(socks5_udp_payload_offset(&v4), Some(10));
+        // IPv6 reply: 3 + 1 + 16 + 2 = 22
+        let mut v6 = vec![0u8, 0, 0, 4];
+        v6.extend_from_slice(&[0u8; 18]);
+        v6.push(b'p');
+        assert_eq!(socks5_udp_payload_offset(&v6), Some(22));
+        // Domain reply: 3 + 1 + 1 + len + 2
+        let dom = [0u8, 0, 0, 3, 3, b'a', b'b', b'c', 0, 80, b'p'];
+        assert_eq!(socks5_udp_payload_offset(&dom), Some(10));
+    }
+
+    #[test]
+    fn test_socks5_udp_payload_offset_rejects_malformed() {
+        assert_eq!(socks5_udp_payload_offset(&[0, 0]), None); // too short
+        assert_eq!(socks5_udp_payload_offset(&[0, 0, 0x01, 1]), None); // FRAG != 0
+        assert_eq!(socks5_udp_payload_offset(&[0, 0, 0, 0x09]), None); // bad ATYP
+        assert_eq!(socks5_udp_payload_offset(&[0, 0, 0, 0x01, 1, 2]), None); // truncated
+    }
+
+    #[test]
+    fn test_socks5_udp_roundtrip() {
+        // A datagram we encode should, when prefixed as a reply, decode back to
+        // the same payload.
+        let dest: SocketAddr = "10.0.0.1:53".parse().unwrap();
+        let pkt = encode_socks5_udp(dest, None, b"payload-bytes");
+        let off = socks5_udp_payload_offset(&pkt).unwrap();
+        assert_eq!(&pkt[off..], b"payload-bytes");
+    }
+
+    /// Stand up a fake SOCKS5 server that accepts a UDP ASSOCIATE and reports a
+    /// relay endpoint, then verify `udp_associate` drives the handshake and
+    /// returns that endpoint.
+    #[tokio::test]
+    async fn test_udp_associate_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Greeting
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+            // ASSOCIATE request
+            let mut req = [0u8; 10];
+            stream.read_exact(&mut req).await.unwrap();
+            assert_eq!(req[0], 0x05);
+            assert_eq!(req[1], 0x03); // UDP ASSOCIATE
+                                      // Reply with relay endpoint 127.0.0.1:9999
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x27, 0x0f])
+                .await
+                .unwrap();
+            // Hold the control connection open
+            let mut buf = [0u8; 1];
+            let _ = stream.read(&mut buf).await;
+        });
+
+        let proxy = UpstreamProxy {
+            protocol: ProxyProtocol::Socks5(ProxyAuth::None),
+            addr: proxy_addr,
+        };
+        let (_control, relay) = udp_associate(
+            &proxy,
+            #[cfg(target_os = "linux")]
+            None,
+            #[cfg(target_os = "macos")]
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(relay, "127.0.0.1:9999".parse().unwrap());
+        drop(_control);
+        let _ = server.await;
+    }
+
+    /// When the proxy replies with an unspecified bind address, datagrams must
+    /// be sent to the proxy's own IP.
+    #[tokio::test]
+    async fn test_udp_associate_unspecified_bind_uses_proxy_ip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+            let mut req = [0u8; 10];
+            stream.read_exact(&mut req).await.unwrap();
+            // Reply BND.ADDR = 0.0.0.0:7000
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0x1b, 0x58])
+                .await
+                .unwrap();
+            let mut buf = [0u8; 1];
+            let _ = stream.read(&mut buf).await;
+        });
+
+        let proxy = UpstreamProxy {
+            protocol: ProxyProtocol::Socks5(ProxyAuth::None),
+            addr: proxy_addr,
+        };
+        let (_control, relay) = udp_associate(
+            &proxy,
+            #[cfg(target_os = "linux")]
+            None,
+            #[cfg(target_os = "macos")]
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Relay IP substituted with the proxy IP (127.0.0.1), port preserved.
+        assert_eq!(relay, SocketAddr::new(proxy_addr.ip(), 7000));
+        drop(_control);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_udp_associate_rejects_http_proxy() {
+        let proxy = UpstreamProxy {
+            protocol: ProxyProtocol::HttpConnect,
+            addr: "127.0.0.1:1".parse().unwrap(),
+        };
+        let err = udp_associate(
+            &proxy,
+            #[cfg(target_os = "linux")]
+            None,
+            #[cfg(target_os = "macos")]
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("requires a SOCKS5"));
+    }
+
     #[tokio::test]
     async fn test_socks5_auth_rejects_overlong_credentials() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -701,14 +1046,7 @@ mod tests {
             username: "u".repeat(MAX_SOCKS5_FIELD_LEN + 1),
             password: "p".to_string(),
         };
-        let err = handshake_socks5(
-            &mut stream,
-            "93.184.216.34:443".parse().unwrap(),
-            Some("example.com"),
-            &auth,
-        )
-        .await
-        .unwrap_err();
+        let err = socks5_negotiate_auth(&mut stream, &auth).await.unwrap_err();
 
         assert!(err.to_string().contains("username is 256 bytes"));
         server.await.unwrap();

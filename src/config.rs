@@ -93,6 +93,14 @@ pub struct UpstreamProxy {
     pub addr: SocketAddr,
 }
 
+impl UpstreamProxy {
+    /// Whether this upstream speaks SOCKS5 (the only protocol that can carry
+    /// UDP, via the UDP ASSOCIATE command).
+    pub fn is_socks5(&self) -> bool {
+        matches!(self.protocol, ProxyProtocol::Socks5(_))
+    }
+}
+
 impl fmt::Display for UpstreamProxy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.protocol {
@@ -333,12 +341,18 @@ pub struct Config {
 
     /// Allow QUIC / HTTP-3 (UDP) to pass through the gateway unproxied.
     ///
-    /// The transparent proxy only relays TCP, so QUIC (UDP, typically port
-    /// 443) would otherwise be forwarded straight to its destination,
-    /// bypassing the upstream proxy entirely — browsers prefer HTTP/3 and
-    /// would silently escape, leaking the client IP and destination. By
-    /// default the firewall drops forwarded QUIC so clients fall back to TCP
-    /// (HTTP/1.1 / HTTP/2), which is proxied. Pass this flag to disable that
+    /// Default behaviour depends on the upstream protocol:
+    /// - **SOCKS5 upstream**: forwarded QUIC (UDP 443) is transparently
+    ///   intercepted and relayed through the proxy via SOCKS5 UDP ASSOCIATE,
+    ///   so HTTP/3 is genuinely proxied (Linux only). Gateway-originated QUIC
+    ///   under `--local-traffic` is still dropped (TCP fallback).
+    /// - **HTTP CONNECT upstream**: QUIC cannot be carried, so forwarded QUIC
+    ///   is dropped, causing clients to fall back to TCP (HTTP/1.1 / HTTP/2),
+    ///   which is proxied.
+    ///
+    /// Either way, leaving QUIC untouched would let HTTP/3-preferring browsers
+    /// silently escape the TCP interception path, leaking the client IP and
+    /// destination. Pass this flag to disable both the interception and the
     /// drop (e.g. if QUIC is handled elsewhere or must be allowed through).
     #[arg(long)]
     pub allow_quic: bool,
@@ -369,6 +383,14 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether transparent UDP proxying (QUIC / HTTP-3 via SOCKS5 UDP
+    /// ASSOCIATE) should be enabled: a SOCKS5 upstream is configured and QUIC
+    /// pass-through was not explicitly requested. Linux-only at the relay
+    /// layer; on other platforms the UDP listener is simply never started.
+    pub fn proxy_udp_enabled(&self) -> bool {
+        !self.allow_quic && self.upstream_proxy.as_ref().is_some_and(|p| p.is_socks5())
+    }
+
     /// Resolve the DNS listen address.
     /// - If `--dns-listen` is set, use it directly.
     /// - If `--dns` is set, auto-detect the interface IP and bind to port 53.

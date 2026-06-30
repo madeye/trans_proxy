@@ -270,10 +270,12 @@ async fn test_port_selective_redirect(root: &Path, ports: &TestServerPorts) -> R
 async fn test_quic_blocked(root: &Path, ports: &TestServerPorts) -> Result<()> {
     eprintln!("\n--- Test 5: QUIC / HTTP-3 (UDP) is dropped, not bypassed ---");
 
-    // The transparent proxy is TCP-only, so QUIC on UDP 443 must be dropped to
-    // prevent it from bypassing the proxy. e2e runs as root, so 127.0.0.1:443
-    // is bindable; a control server on an ephemeral port proves the drop is
-    // targeted (only QUIC ports), not a blanket UDP block.
+    // With an HTTP CONNECT upstream (which cannot carry UDP), QUIC on UDP 443
+    // must be dropped to prevent it from bypassing the TCP-only proxy. e2e runs
+    // as root, so 127.0.0.1:443 is bindable; a control server on an ephemeral
+    // port proves the drop is targeted (only QUIC ports), not a blanket UDP
+    // block. (The SOCKS5 upstream instead TPROXY-redirects UDP 443 — that path
+    // needs a real forwarding/ingress setup and is covered separately.)
     let quic_server = UdpSocket::bind("127.0.0.1:443")
         .await
         .context("bind UDP 127.0.0.1:443 (e2e must run as root)")?;
@@ -281,13 +283,12 @@ async fn test_quic_blocked(root: &Path, ports: &TestServerPorts) -> Result<()> {
     let control_port = control_server.local_addr()?.port();
 
     let proxy_port = 18447u16;
-    let upstream = format!("socks5://127.0.0.1:{}", ports.socks5_port);
 
     // Proxy TCP 443 → quic_block_ports mirrors it, dropping UDP 443.
     let _nft = setup_nftables(
         root,
         proxy_port,
-        &format!("127.0.0.1:{}", ports.socks5_port),
+        &format!("127.0.0.1:{}", ports.http_connect_port),
         "443",
     )?;
 
@@ -306,13 +307,26 @@ async fn test_quic_blocked(root: &Path, ports: &TestServerPorts) -> Result<()> {
         .context("control recv_from failed")?;
     eprintln!("  control UDP delivered (drop is targeted, not blanket)");
 
-    // QUIC: UDP to 443 must be dropped — it must never reach the server.
-    client.send_to(b"quic", "127.0.0.1:443").await?;
-    let leaked = timeout(Duration::from_millis(500), quic_server.recv_from(&mut buf)).await;
-    if leaked.is_ok() {
-        bail!("UDP 443 reached the server: QUIC/HTTP-3 bypassed the proxy");
+    // QUIC: UDP to 443 must be blocked — it must never reach the server. The
+    // drop lives in the OUTPUT hook (see module docs), and the kernel reports a
+    // locally-generated packet killed there by returning EPERM straight to
+    // `send_to`. So a block surfaces one of two ways, both acceptable:
+    //   - EPERM on send (the common loopback case), or
+    //   - the send succeeds but nothing is ever delivered.
+    // Only actual delivery to the server counts as a bypass.
+    match client.send_to(b"quic", "127.0.0.1:443").await {
+        Err(e) if e.raw_os_error() == Some(libc::EPERM) => {
+            eprintln!("  UDP 443 blocked at send (EPERM from OUTPUT drop)");
+        }
+        Err(e) => return Err(e).context("unexpected error sending QUIC probe"),
+        Ok(_) => {
+            let leaked = timeout(Duration::from_millis(500), quic_server.recv_from(&mut buf)).await;
+            if leaked.is_ok() {
+                bail!("UDP 443 reached the server: QUIC/HTTP-3 bypassed the proxy");
+            }
+            eprintln!("  UDP 443 dropped");
+        }
     }
-    eprintln!("  UDP 443 dropped");
 
     eprintln!("  PASS");
     Ok(())
