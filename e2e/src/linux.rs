@@ -307,13 +307,26 @@ async fn test_quic_blocked(root: &Path, ports: &TestServerPorts) -> Result<()> {
         .context("control recv_from failed")?;
     eprintln!("  control UDP delivered (drop is targeted, not blanket)");
 
-    // QUIC: UDP to 443 must be dropped — it must never reach the server.
-    client.send_to(b"quic", "127.0.0.1:443").await?;
-    let leaked = timeout(Duration::from_millis(500), quic_server.recv_from(&mut buf)).await;
-    if leaked.is_ok() {
-        bail!("UDP 443 reached the server: QUIC/HTTP-3 bypassed the proxy");
+    // QUIC: UDP to 443 must be blocked — it must never reach the server. The
+    // drop lives in the OUTPUT hook (see module docs), and the kernel reports a
+    // locally-generated packet killed there by returning EPERM straight to
+    // `send_to`. So a block surfaces one of two ways, both acceptable:
+    //   - EPERM on send (the common loopback case), or
+    //   - the send succeeds but nothing is ever delivered.
+    // Only actual delivery to the server counts as a bypass.
+    match client.send_to(b"quic", "127.0.0.1:443").await {
+        Err(e) if e.raw_os_error() == Some(libc::EPERM) => {
+            eprintln!("  UDP 443 blocked at send (EPERM from OUTPUT drop)");
+        }
+        Err(e) => return Err(e).context("unexpected error sending QUIC probe"),
+        Ok(_) => {
+            let leaked = timeout(Duration::from_millis(500), quic_server.recv_from(&mut buf)).await;
+            if leaked.is_ok() {
+                bail!("UDP 443 reached the server: QUIC/HTTP-3 bypassed the proxy");
+            }
+            eprintln!("  UDP 443 dropped");
+        }
     }
-    eprintln!("  UDP 443 dropped");
 
     eprintln!("  PASS");
     Ok(())
