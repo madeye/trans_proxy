@@ -73,6 +73,8 @@ mod proxy;
 mod service;
 mod sni;
 mod tunnel;
+#[cfg(target_os = "linux")]
+mod udp;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -187,6 +189,26 @@ fn main() -> Result<()> {
                 tokio::spawn(async move {
                     if let Err(e) = gateway::run(&iface).await {
                         tracing::error!("Gateway advertisement failed: {:#}", e);
+                    }
+                });
+            }
+
+            // Transparent UDP relay for QUIC / HTTP-3 via SOCKS5 UDP ASSOCIATE
+            // (Linux only). A bind failure (e.g. missing CAP_NET_ADMIN) is not
+            // fatal: forwarded QUIC then has no listener and is dropped by the
+            // kernel, so clients still fall back to the proxied TCP path.
+            #[cfg(target_os = "linux")]
+            if config.proxy_udp_enabled() {
+                let listen_addr = config.listen_addr;
+                let proxy = config
+                    .upstream_proxy
+                    .clone()
+                    .expect("upstream proxy is required when proxy runs");
+                let table = dns_table.clone();
+                let fwmark = config.local_traffic.then_some(config.fwmark);
+                tokio::spawn(async move {
+                    if let Err(e) = udp::run(listen_addr, proxy, table, fwmark).await {
+                        tracing::warn!("Transparent UDP relay disabled: {:#}", e);
                     }
                 });
             }

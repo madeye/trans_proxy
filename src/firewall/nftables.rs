@@ -292,12 +292,22 @@ pub fn setup(config: &FirewallConfig) -> Result<()> {
         }
     }
 
-    // Drop forwarded QUIC / HTTP-3 so it can't bypass the TCP-only proxy.
-    setup_quic_block(config, NftFamily::Ip)?;
+    // Handle forwarded QUIC / HTTP-3 (UDP): either TPROXY-redirect it into the
+    // SOCKS5 upstream (proxy_udp) or drop it so clients fall back to TCP.
+    setup_udp_handling(config, NftFamily::Ip)?;
 
     // --- IPv6 (best-effort) ---
     if let Err(e) = setup_ipv6(config, &addrs) {
         println!("Warning: IPv6 NAT redirect setup failed ({e:#}), skipping.");
+    }
+
+    // Policy routing for TPROXY (global, not per-family). Best-effort: a
+    // failure here just means intercepted QUIC isn't delivered locally (so it's
+    // effectively dropped — TCP fallback), never a broken gateway.
+    if config.proxy_udp {
+        if let Err(e) = setup_tproxy_routing() {
+            println!("Warning: TPROXY policy routing failed ({e:#}); HTTP/3 won't be proxied.");
+        }
     }
 
     println!("Done. Firewall rules configured.");
@@ -571,8 +581,8 @@ fn setup_ipv6(config: &FirewallConfig, addrs: &super::InterfaceAddrs) -> Result<
         }
     }
 
-    // Drop forwarded QUIC / HTTP-3 (IPv6) so it can't bypass the proxy.
-    setup_quic_block(config, NftFamily::Ip6)?;
+    // Handle forwarded QUIC / HTTP-3 (IPv6): TPROXY-redirect or drop.
+    setup_udp_handling(config, NftFamily::Ip6)?;
 
     Ok(())
 }
@@ -584,6 +594,180 @@ impl NftFamily {
             NftFamily::Ip6 => "ip6",
         }
     }
+}
+
+/// Firewall mark + table used to divert TPROXY-intercepted packets to the local
+/// listening socket. The mark uses a dedicated high bit (matched with a mask)
+/// so it never collides with the small `--local-traffic` loop-prevention
+/// fwmark, whose own `ip rule` must not catch these packets.
+const TPROXY_MARK: &str = "0x40000000";
+const TPROXY_MASK: &str = "0x40000000";
+const TPROXY_TABLE: &str = "0x2333";
+
+fn tproxy_fwmark_spec() -> String {
+    format!("{TPROXY_MARK}/{TPROXY_MASK}")
+}
+
+/// Decide how forwarded QUIC / HTTP-3 (UDP) is handled for a single family.
+///
+/// - `proxy_udp`: TPROXY-redirect forwarded QUIC into the SOCKS5 upstream, but
+///   still drop *gateway-originated* QUIC (under `--local-traffic`) so the
+///   gateway's own clients fall back to TCP — TPROXY only hooks the forward
+///   path, not locally-generated traffic.
+/// - otherwise, if `block_quic`: drop forwarded and gateway-originated QUIC.
+fn setup_udp_handling(config: &FirewallConfig, family: NftFamily) -> Result<()> {
+    if config.proxy_udp {
+        // Best-effort: if the kernel lacks `nft tproxy` support, fall back to
+        // dropping QUIC so the gateway still never leaks it (identical to the
+        // HTTP-CONNECT path) instead of failing the whole firewall setup.
+        match setup_udp_tproxy(config, family) {
+            Ok(()) => setup_quic_block_output(config, family)?,
+            Err(e) => {
+                println!(
+                    "Warning: TPROXY setup for {} failed ({e:#}); \
+                     falling back to dropping QUIC (HTTP/3 won't be proxied).",
+                    family.table()
+                );
+                setup_quic_block(config, family)?;
+            }
+        }
+    } else if config.block_quic {
+        setup_quic_block(config, family)?;
+    }
+    Ok(())
+}
+
+/// TPROXY-redirect forwarded QUIC / HTTP-3 (UDP) to the proxy's UDP listener.
+///
+/// Uses a `filter`-typed chain at `prerouting` priority `mangle` (before NAT),
+/// marking matched packets so the companion `ip rule` ([`setup_tproxy_routing`])
+/// routes them to the local transparent socket instead of forwarding them.
+fn setup_udp_tproxy(config: &FirewallConfig, family: NftFamily) -> Result<()> {
+    let ports = config.quic_block_ports();
+    if ports.is_empty() {
+        return Ok(());
+    }
+    let table = family.table();
+    let iface = &config.interface;
+    let proxy_port = config.proxy_port;
+
+    let port_list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+    println!(
+        "TPROXY-redirecting forwarded QUIC/HTTP-3 (UDP {}) into the SOCKS5 upstream...",
+        port_list.join(",")
+    );
+
+    run_cmd(
+        "nft",
+        &[
+            "add",
+            "chain",
+            table,
+            "trans_proxy",
+            "tproxy_prerouting",
+            "{ type filter hook prerouting priority mangle ; }",
+        ],
+    )?;
+    for port in &ports {
+        run_nft_args(&tproxy_rule_args(family, iface, *port, proxy_port))?;
+    }
+
+    Ok(())
+}
+
+/// Build the `nft add rule` args for a single UDP TPROXY redirect rule.
+fn tproxy_rule_args(family: NftFamily, iface: &str, port: u16, proxy_port: u16) -> Vec<String> {
+    vec![
+        "add".to_string(),
+        "rule".to_string(),
+        family.table().to_string(),
+        "trans_proxy".to_string(),
+        "tproxy_prerouting".to_string(),
+        "iifname".to_string(),
+        iface.to_string(),
+        "udp".to_string(),
+        "dport".to_string(),
+        port.to_string(),
+        "tproxy".to_string(),
+        "to".to_string(),
+        format!(":{proxy_port}"),
+        "meta".to_string(),
+        "mark".to_string(),
+        "set".to_string(),
+        TPROXY_MARK.to_string(),
+        "accept".to_string(),
+    ]
+}
+
+/// Install the policy-routing rule + local route that deliver TPROXY-marked
+/// packets to the local stack (so they reach the transparent UDP socket).
+/// Idempotent: removes any prior rule/route first. IPv6 is best-effort.
+fn setup_tproxy_routing() -> Result<()> {
+    let spec = tproxy_fwmark_spec();
+    println!("Adding TPROXY policy routing (fwmark {spec} -> table {TPROXY_TABLE})...");
+
+    run_cmd_ignore(
+        "ip",
+        &["rule", "del", "fwmark", &spec, "lookup", TPROXY_TABLE],
+    );
+    run_cmd(
+        "ip",
+        &["rule", "add", "fwmark", &spec, "lookup", TPROXY_TABLE],
+    )?;
+    run_cmd_ignore("ip", &["route", "flush", "table", TPROXY_TABLE]);
+    run_cmd(
+        "ip",
+        &[
+            "route",
+            "add",
+            "local",
+            "0.0.0.0/0",
+            "dev",
+            "lo",
+            "table",
+            TPROXY_TABLE,
+        ],
+    )?;
+
+    // IPv6 (best-effort)
+    run_cmd_ignore(
+        "ip",
+        &["-6", "rule", "del", "fwmark", &spec, "lookup", TPROXY_TABLE],
+    );
+    let _ = std::process::Command::new("ip")
+        .args(["-6", "rule", "add", "fwmark", &spec, "lookup", TPROXY_TABLE])
+        .status();
+    run_cmd_ignore("ip", &["-6", "route", "flush", "table", TPROXY_TABLE]);
+    let _ = std::process::Command::new("ip")
+        .args([
+            "-6",
+            "route",
+            "add",
+            "local",
+            "::/0",
+            "dev",
+            "lo",
+            "table",
+            TPROXY_TABLE,
+        ])
+        .status();
+
+    Ok(())
+}
+
+/// Remove the TPROXY policy-routing rule + local route (both families).
+fn teardown_tproxy_routing() {
+    let spec = tproxy_fwmark_spec();
+    run_cmd_ignore(
+        "ip",
+        &["rule", "del", "fwmark", &spec, "lookup", TPROXY_TABLE],
+    );
+    run_cmd_ignore("ip", &["route", "flush", "table", TPROXY_TABLE]);
+    run_cmd_ignore(
+        "ip",
+        &["-6", "rule", "del", "fwmark", &spec, "lookup", TPROXY_TABLE],
+    );
+    run_cmd_ignore("ip", &["-6", "route", "flush", "table", TPROXY_TABLE]);
 }
 
 /// Drop QUIC / HTTP-3 (UDP) destined for the proxied ports so it cannot bypass
@@ -636,27 +820,44 @@ fn setup_quic_block(config: &FirewallConfig, family: NftFamily) -> Result<()> {
     }
 
     // Gateway-originated QUIC: only intercepted alongside other local traffic.
-    if config.fwmark.is_some() {
-        run_cmd(
-            "nft",
-            &[
-                "add",
-                "chain",
-                table,
-                "trans_proxy",
-                "quic_output",
-                "{ type filter hook output priority 0 ; }",
-            ],
-        )?;
-        for port in &ports {
-            run_nft_args(&quic_drop_rule_args(
-                family,
-                "quic_output",
-                "oifname",
-                iface,
-                *port,
-            ))?;
-        }
+    setup_quic_block_output(config, family)?;
+
+    Ok(())
+}
+
+/// Drop *gateway-originated* QUIC / HTTP-3 (the `output` hook), only when
+/// `--local-traffic` is enabled (signalled by `fwmark`).
+///
+/// Shared by the drop path ([`setup_quic_block`]) and the TPROXY path: TPROXY
+/// only hooks `prerouting`, so locally-generated QUIC must still be dropped to
+/// force the gateway's own clients onto the proxied TCP path.
+fn setup_quic_block_output(config: &FirewallConfig, family: NftFamily) -> Result<()> {
+    let ports = config.quic_block_ports();
+    if ports.is_empty() || config.fwmark.is_none() {
+        return Ok(());
+    }
+    let table = family.table();
+    let iface = &config.interface;
+
+    run_cmd(
+        "nft",
+        &[
+            "add",
+            "chain",
+            table,
+            "trans_proxy",
+            "quic_output",
+            "{ type filter hook output priority 0 ; }",
+        ],
+    )?;
+    for port in &ports {
+        run_nft_args(&quic_drop_rule_args(
+            family,
+            "quic_output",
+            "oifname",
+            iface,
+            *port,
+        ))?;
     }
 
     Ok(())
@@ -721,6 +922,9 @@ pub fn teardown() -> Result<()> {
     run_cmd_ignore("nft", &["delete", "table", "ip", "trans_proxy"]);
     run_cmd_ignore("nft", &["delete", "table", "ip6", "trans_proxy"]);
 
+    println!("Removing TPROXY policy routing (if any)...");
+    teardown_tproxy_routing();
+
     println!("Disabling IP forwarding...");
     run_cmd("sysctl", &["-w", "net.ipv4.ip_forward=0"])?;
     let _ = std::process::Command::new("sysctl")
@@ -775,6 +979,42 @@ mod tests {
                 "drop"
             ]
         );
+    }
+
+    #[test]
+    fn builds_ipv4_tproxy_redirect_rule() {
+        let args = super::tproxy_rule_args(NftFamily::Ip, "eth0", 443, 8443);
+        assert_eq!(
+            args,
+            [
+                "add",
+                "rule",
+                "ip",
+                "trans_proxy",
+                "tproxy_prerouting",
+                "iifname",
+                "eth0",
+                "udp",
+                "dport",
+                "443",
+                "tproxy",
+                "to",
+                ":8443",
+                "meta",
+                "mark",
+                "set",
+                "0x40000000",
+                "accept",
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_ipv6_tproxy_redirect_rule() {
+        let args = super::tproxy_rule_args(NftFamily::Ip6, "eth0", 443, 8443);
+        assert_eq!(args[2], "ip6");
+        assert_eq!(args[11], "to");
+        assert_eq!(args[12], ":8443");
     }
 
     #[test]
