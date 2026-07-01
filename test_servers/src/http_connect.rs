@@ -15,8 +15,10 @@ pub struct HttpConnectServer {
 }
 
 impl HttpConnectServer {
-    pub async fn bind() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+    pub async fn bind(addr: &str, port: u16) -> Result<Self> {
+        let listener = TcpListener::bind(format!("{addr}:{port}"))
+            .await
+            .with_context(|| format!("failed to bind HTTP CONNECT on {addr}:{port}"))?;
         Ok(Self {
             listener,
             connection_count: Arc::new(AtomicU64::new(0)),
